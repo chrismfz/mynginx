@@ -1,0 +1,81 @@
+worker_processes auto;
+thread_pool default_pool threads=32 max_queue=65536;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    sendfile        on;
+    keepalive_timeout 65;
+
+    # Global HTTP/3 Settings
+    http3 on;
+    quic_gso on;
+    quic_retry on;
+
+    # Gzip & Brotli
+    gzip on;
+    gzip_static on;
+    brotli on;
+    brotli_comp_level 6;
+    brotli_static on;
+    brotli_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # Cache setup
+    proxy_cache_path /opt/nginx/cache levels=1:2 keys_zone=mycache:10m max_size=100m inactive=60m use_temp_path=off;
+    fastcgi_cache_path /opt/nginx/cache/fastcgi levels=1:2 keys_zone=php_cache:10m inactive=60m max_size=512m;
+    fastcgi_cache_key "$scheme$request_method$host$request_uri";
+
+    # HTTP -> HTTPS Redirect
+    server {
+        listen 80;
+        server_name {{DOMAIN}};
+        location / {
+            return 301 https://$host$request_uri;
+        }
+    }
+
+    # HTTPS Server
+    server {
+        listen 443 ssl;
+        listen 443 quic reuseport;
+        server_name {{DOMAIN}};
+
+        # Placeholders for Certbot paths
+        ssl_certificate     /etc/letsencrypt/live/{{DOMAIN}}/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/{{DOMAIN}}/privkey.pem;
+
+        ssl_protocols TLSv1.3;
+        ssl_early_data on;
+
+        add_header Alt-Svc 'h3=":443"; ma=86400';
+        http3 on;
+        http2 on;
+
+        root /opt/nginx/html;
+        index index.html index.htm index.php;
+
+        location ~ \.php$ {
+            include fastcgi_params;
+            fastcgi_pass 127.0.0.1:9000;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            
+            fastcgi_cache php_cache;
+            fastcgi_cache_valid 200 1s;
+            fastcgi_cache_use_stale error timeout updating;
+            fastcgi_cache_lock on;
+            add_header X-Cache-Status $upstream_cache_status;
+        }
+
+        location / {
+            sendfile on;
+            aio threads=default_pool;
+            tcp_nopush on;
+            try_files $uri $uri/ =404;
+        }
+    }
+}
