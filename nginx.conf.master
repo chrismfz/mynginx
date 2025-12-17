@@ -39,7 +39,7 @@ http {
 
         # Serve the Let's Encrypt challenge files
         location ^~ /.well-known/acme-challenge/ {
-            root /opt/nginx/html/;
+            root /opt/nginx/html;
             default_type "text/plain";
             allow all;
         }
