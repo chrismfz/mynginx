@@ -16,7 +16,7 @@ HTML_PATH="/opt/nginx/html"
 echo "--- 1. Installing Build Dependencies & Tools ---"
 apt update
 apt install -y build-essential cmake git curl wget perl golang-go \
-               libpcre3-dev zlib1g-dev libpcre2-dev libssl-dev certbot ufw
+               zlib1g-dev libpcre2-dev libssl-dev certbot net-tools
 
 echo "--- 2. Fetching Source Code & Master Config ---"
 mkdir -p $SRC_DIR
@@ -51,16 +51,26 @@ rm -rf build && mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$AWS_LC_PATH -DBUILD_SHARED_LIBS=OFF
 cmake --build . --target install
 
-echo "--- 4. Compiling NGINX with HTTP/3 & Brotli ---"
+# --- 3.5 Prepare Brotli ---
+echo "--- Preparing Brotli Dependencies ---"
+cd $SRC_DIR/ngx_brotli/deps/brotli
+rm -rf out && mkdir out && cd out
+cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+cmake --build . --config Release --target brotlienc brotlicommon brotlidec
+
+# --- 4. Compiling NGINX ---
+echo "--- Compiling NGINX ---"
 cd $SRC_DIR/nginx
+
+# We need to tell NGINX exactly where those new brotli and awc-lc libraries are
 ./auto/configure \
     --prefix=$NGINX_PATH \
     --with-debug \
     --with-http_ssl_module \
     --with-http_v2_module \
     --with-http_v3_module \
-    --with-cc-opt="-I$AWS_LC_PATH/include" \
-    --with-ld-opt="-L$AWS_LC_PATH/lib -lssl -lcrypto -lstdc++" \
+    --with-cc-opt="-I$AWS_LC_PATH/include -I$SRC_DIR/ngx_brotli/deps/brotli/c/include" \
+    --with-ld-opt="-L$AWS_LC_PATH/lib -L$SRC_DIR/ngx_brotli/deps/brotli/out -lssl -lcrypto -lstdc++" \
     --with-pcre-jit \
     --with-threads \
     --with-file-aio \
