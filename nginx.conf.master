@@ -30,10 +30,21 @@ http {
     fastcgi_cache_path /opt/nginx/cache/fastcgi levels=1:2 keys_zone=php_cache:10m inactive=60m max_size=512m;
     fastcgi_cache_key "$scheme$request_method$host$request_uri";
 
-    # HTTP -> HTTPS Redirect
+# ---------------------------
+    # HTTP -> HTTPS Redirect + Certbot
+    # ---------------------------
     server {
         listen 80;
         server_name {{DOMAIN}};
+
+        # Serve the Let's Encrypt challenge files
+        location ^~ /.well-known/acme-challenge/ {
+            root /opt/nginx/html/acme-challenge/;
+            default_type "text/plain";
+            allow all;
+        }
+
+        # Redirect all other traffic to HTTPS
         location / {
             return 301 https://$host$request_uri;
         }
