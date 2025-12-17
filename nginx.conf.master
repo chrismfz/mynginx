@@ -1,3 +1,4 @@
+user www-data;
 worker_processes auto;
 thread_pool default_pool threads=32 max_queue=65536;
 
