@@ -15,7 +15,7 @@ HTML_PATH="/opt/nginx/html"
 
 echo "--- 1. Installing Build Dependencies & Tools ---"
 apt update
-apt install -y build-essential cmake git curl wget perl golang-go \
+apt install -y build-essential cmake git curl wget perl golang-go gpg lsb-release ca-certificates apt-transport-https \
                zlib1g-dev libpcre2-dev libssl-dev certbot net-tools
 
 echo "--- 2. Fetching Source Code & Master Config ---"
