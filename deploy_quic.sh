@@ -111,11 +111,7 @@ certbot certonly --webroot \
     --deploy-hook "$NGINX_PATH/sbin/nginx -s reload"
 
 echo "--- 8. Security: Firewall (UFW) ---"
-ufw allow ssh
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 443/udp
-ufw --force enable
+#TODO#
 
 echo "--- 9. Setting Up Logrotate ---"
 cat <<EOF > /etc/logrotate.d/nginx-custom
