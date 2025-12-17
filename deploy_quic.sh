@@ -103,6 +103,22 @@ EOF
 
 systemctl daemon-reload
 
+
+echo "--- 5.5 Creating Temporary Self-Signed Certificate ---"
+# Create the directory for the certificates
+mkdir -p /etc/letsencrypt/live/$DOMAIN
+
+# Generate a fast self-signed cert so NGINX can pass its syntax check
+openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
+    -keyout /etc/letsencrypt/live/$DOMAIN/privkey.pem \
+    -out /etc/letsencrypt/live/$DOMAIN/fullchain.pem \
+    -subj "/CN=$DOMAIN"
+
+# Ensure NGINX can read them
+chmod 600 /etc/letsencrypt/live/$DOMAIN/privkey.pem
+
+
+
 echo "--- 6. Initial Config Deployment (Pre-SSL) ---"
 # Generate the live config from the master template
 cp $NGINX_PATH/conf/nginx.conf.master $NGINX_PATH/conf/nginx.conf
@@ -118,6 +134,7 @@ certbot certonly --webroot \
     --non-interactive --agree-tos --email "$EMAIL" \
     --key-type ecdsa \
     -d "$DOMAIN" \
+    --force-renewal \
     --deploy-hook "$NGINX_PATH/sbin/nginx -s reload"
 
 echo "--- 8. Security: Firewall (UFW) ---"
