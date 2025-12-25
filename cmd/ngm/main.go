@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"mynginx/internal/certs"
 	"mynginx/internal/config"
 	"mynginx/internal/nginx"
 	"mynginx/internal/store"
@@ -51,20 +54,29 @@ func main() {
 
 	switch args[0] {
 	case "site":
-		if err := cmdSite(st, cfg, args[1:]); err != nil {
+		if err := cmdSite(st, cfg, paths, args[1:]); err != nil {
 			log.Fatalf("site: %v", err)
 		}
 	case "apply":
 		if err := cmdApply(st, cfg, paths, args[1:]); err != nil {
 			log.Fatalf("apply: %v", err)
 		}
+	case "cert":
+		if err := cmdCert(cfg, paths, args[1:]); err != nil {
+			log.Fatalf("cert: %v", err)
+		}
 	default:
 		fmt.Printf("Unknown command: %s\n", args[0])
 		fmt.Println("Commands:")
-		fmt.Println("  site add --user <u> --domain <d> [--mode php|proxy|static] [--php 8.3] [--webroot <path>] [--http3=true|false]")
+		fmt.Println("  site add --user <u> --domain <d> [--mode php|proxy|static] [--php 8.3] [--webroot <path>] [--http3=true|false] [--skip-cert]")
 		fmt.Println("  site list")
-		fmt.Println("  site rm --domain <d>              (soft-delete: disable + pending delete)")
+		fmt.Println("  site rm --domain <d>")
 		fmt.Println("  apply [--domain <d>] [--all] [--dry-run] [--limit N]")
+		fmt.Println("  cert list                          (show all certificates)")
+		fmt.Println("  cert info --domain <d>             (show cert details)")
+		fmt.Println("  cert issue --domain <d>            (issue/renew certificate)")
+		fmt.Println("  cert renew [--domain <d>] [--all] (renew expiring certs)")
+		fmt.Println("  cert check [--days 30]             (check expiring soon)")
 		os.Exit(2)
 	}
 }
@@ -109,7 +121,7 @@ func runStatus(cfg *config.Config, paths config.Paths) {
 	fmt.Printf("versions    : %d\n", len(cfg.PHPFPM.Versions))
 }
 
-func cmdSite(st store.SiteStore, cfg *config.Config, args []string) error {
+func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: site <add|list|rm> ...")
 	}
@@ -125,6 +137,7 @@ func cmdSite(st store.SiteStore, cfg *config.Config, args []string) error {
 			webroot   = fs.String("webroot", "", "Webroot path (optional; default derived from user+domain)")
 			http3     = fs.Bool("http3", true, "Enable HTTP/3")
 			provision = fs.Bool("provision", true, "Create linux user (if missing) + create site dirs")
+			skipCert  = fs.Bool("skip-cert", false, "Skip automatic certificate issuance")
 		)
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -143,11 +156,10 @@ func cmdSite(st store.SiteStore, cfg *config.Config, args []string) error {
 
 		wr := *webroot
 		if wr == "" {
-			// /home/<user>/<sites_root_name>/<domain>/public
 			wr = filepath.Join(home, cfg.Hosting.SitesRootName, d, "public")
 		}
 
-		// Provision OS user + filesystem layout (so nginx root exists)
+		// Provision OS user + filesystem layout
 		if *provision {
 			if err := users.EnsureSystemUser(*user, home); err != nil {
 				return err
@@ -158,6 +170,27 @@ func cmdSite(st store.SiteStore, cfg *config.Config, args []string) error {
 			}
 			if _, err := users.EnsureSiteDirs(*user, home, wr, webGroup); err != nil {
 				return err
+			}
+		}
+
+		// Issue certificate automatically (unless skipped)
+		if !*skipCert {
+			fmt.Printf("Issuing certificate for %s...\n", d)
+			certMgr := certs.NewCertbotManager(
+				paths.CertbotBin,
+				paths.ACMEWebroot,
+				paths.LetsEncryptLive,
+				cfg.Certs.Email,
+			)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			if err := certMgr.EnsureCertExists(ctx, d); err != nil {
+				fmt.Printf("WARNING: Certificate issuance failed: %v\n", err)
+				fmt.Println("You can issue it manually later with: cert issue --domain", d)
+			} else {
+				fmt.Println("Certificate issued successfully!")
 			}
 		}
 
@@ -230,6 +263,162 @@ func cmdSite(st store.SiteStore, cfg *config.Config, args []string) error {
 	}
 }
 
+func cmdCert(cfg *config.Config, paths config.Paths, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cert <list|info|issue|renew|check> ...")
+	}
+
+	certMgr := certs.NewCertbotManager(
+		paths.CertbotBin,
+		paths.ACMEWebroot,
+		paths.LetsEncryptLive,
+		cfg.Certs.Email,
+	)
+
+	switch args[0] {
+	case "list":
+		certList, err := certMgr.ListCerts()
+		if err != nil {
+			return err
+		}
+		if len(certList) == 0 {
+			fmt.Println("(no certificates)")
+			return nil
+		}
+
+		fmt.Printf("%-30s  %-12s  %-20s  %-20s\n", "DOMAIN", "DAYS LEFT", "NOT BEFORE", "NOT AFTER")
+		for _, c := range certList {
+			status := fmt.Sprintf("%d days", c.DaysLeft)
+			if c.DaysLeft < 0 {
+				status = "EXPIRED"
+			} else if c.DaysLeft <= 7 {
+				status = fmt.Sprintf("%d days (!)", c.DaysLeft)
+			}
+			fmt.Printf("%-30s  %-12s  %-20s  %-20s\n",
+				c.Domain,
+				status,
+				c.NotBefore.Format("2006-01-02 15:04"),
+				c.NotAfter.Format("2006-01-02 15:04"),
+			)
+		}
+		return nil
+
+	case "info":
+		fs := flag.NewFlagSet("cert info", flag.ContinueOnError)
+		domain := fs.String("domain", "", "Domain")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *domain == "" {
+			return fmt.Errorf("required: --domain")
+		}
+
+		info, err := certMgr.GetCertInfo(*domain)
+		if err != nil {
+			return err
+		}
+
+		if !info.Exists {
+			fmt.Printf("Certificate does not exist for: %s\n", *domain)
+			return nil
+		}
+
+		fmt.Printf("Domain      : %s\n", info.Domain)
+		fmt.Printf("Cert Path   : %s\n", info.CertPath)
+		fmt.Printf("Key Path    : %s\n", info.KeyPath)
+		fmt.Printf("Not Before  : %s\n", info.NotBefore.Format(time.RFC3339))
+		fmt.Printf("Not After   : %s\n", info.NotAfter.Format(time.RFC3339))
+		fmt.Printf("Days Left   : %d\n", info.DaysLeft)
+		if info.DaysLeft < 0 {
+			fmt.Println("Status      : EXPIRED")
+		} else if info.DaysLeft <= 7 {
+			fmt.Println("Status      : EXPIRING SOON")
+		} else if info.DaysLeft <= 30 {
+			fmt.Println("Status      : RENEWAL DUE")
+		} else {
+			fmt.Println("Status      : OK")
+		}
+		return nil
+
+	case "issue":
+		fs := flag.NewFlagSet("cert issue", flag.ContinueOnError)
+		domain := fs.String("domain", "", "Domain")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *domain == "" {
+			return fmt.Errorf("required: --domain")
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		fmt.Printf("Issuing certificate for %s...\n", *domain)
+		if err := certMgr.IssueCert(ctx, *domain); err != nil {
+			return err
+		}
+		fmt.Println("Certificate issued successfully!")
+		return nil
+
+	case "renew":
+		fs := flag.NewFlagSet("cert renew", flag.ContinueOnError)
+		domain := fs.String("domain", "", "Domain (optional, renews all if not specified)")
+		all := fs.Bool("all", false, "Renew all certificates")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		if *all || *domain == "" {
+			fmt.Println("Renewing all certificates...")
+			if err := certMgr.RenewAll(ctx); err != nil {
+				return err
+			}
+			fmt.Println("Renewal complete!")
+		} else {
+			fmt.Printf("Renewing certificate for %s...\n", *domain)
+			if err := certMgr.RenewCert(ctx, *domain); err != nil {
+				return err
+			}
+			fmt.Println("Renewal complete!")
+		}
+		return nil
+
+	case "check":
+		fs := flag.NewFlagSet("cert check", flag.ContinueOnError)
+		days := fs.Int("days", 30, "Check for certs expiring within N days")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+
+		expiring, err := certMgr.CheckExpiringSoon(*days)
+		if err != nil {
+			return err
+		}
+
+		if len(expiring) == 0 {
+			fmt.Printf("No certificates expiring within %d days.\n", *days)
+			return nil
+		}
+
+		fmt.Printf("Certificates expiring within %d days:\n\n", *days)
+		fmt.Printf("%-30s  %-12s  %-20s\n", "DOMAIN", "DAYS LEFT", "EXPIRES")
+		for _, c := range expiring {
+			fmt.Printf("%-30s  %-12d  %-20s\n",
+				c.Domain,
+				c.DaysLeft,
+				c.NotAfter.Format("2006-01-02 15:04"),
+			)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unknown cert subcommand: %s", args[0])
+	}
+}
+
 func siteState(s store.Site) (state string, last string) {
 	last = "-"
 	if s.LastAppliedAt != nil {
@@ -294,10 +483,9 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 	sqlSt, _ := st.(*storesqlite.Store)
 
 	buildTD := func(s store.Site, d string) (nginx.SiteTemplateData, error) {
-		// Derive site directories from webroot
 		siteRoot := filepath.Dir(s.Webroot)
 		logsDir := filepath.Join(siteRoot, "logs")
-		
+
 		phpPass := ""
 		if s.Mode == "" || s.Mode == "php" {
 			ver, ok := cfg.PHPFPM.Versions[s.PHPVersion]
@@ -338,12 +526,10 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 		return td, nil
 	}
 
-	// --domain: single site apply (or single delete if disabled)
 	if strings.TrimSpace(*domain) != "" {
 		return applySingle(mgr, st, cfg, sqlSt, buildTD, *domain, *dry)
 	}
 
-	// batch mode: pending by default (plus disabled => pending delete). --all => all enabled
 	sites, err := st.ListSites()
 	if err != nil {
 		return err
@@ -351,7 +537,7 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 
 	var (
 		changed []string
-		hashes  = map[string]string{} // domain -> render hash (or "" for delete)
+		hashes  = map[string]string{}
 	)
 
 	appliedCount := 0
@@ -362,7 +548,6 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 
 		d := strings.ToLower(strings.TrimSpace(s.Domain))
 
-		// disabled => delete live conf (pending delete)
 		if !s.Enabled {
 			if *dry {
 				fmt.Println("dry-run delete:", d)
@@ -379,7 +564,6 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 				continue
 			}
 			if !ok {
-				// nothing existed
 				continue
 			}
 			fmt.Println("staged delete:", d)
@@ -389,7 +573,6 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 			continue
 		}
 
-		// enabled => apply pending unless --all
 		if !*all && !siteNeedsApply(s) {
 			continue
 		}
@@ -425,7 +608,6 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 		}
 		fmt.Println("rendered:", outPath)
 
-		// publish only (no reload), then one global nginx -t + reload at the end
 		if err := mgr.PublishOnly(d); err != nil {
 			if sqlSt != nil {
 				_ = sqlSt.UpdateApplyResult(d, "fail", err.Error(), renderHash)
@@ -447,7 +629,6 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 		return nil
 	}
 
-	// One nginx -t for all changes
 	if err := mgr.TestConfig(); err != nil {
 		rollbackFromBackup(mgr, changed)
 		_ = mgr.Reload()
@@ -459,7 +640,6 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 		return fmt.Errorf("nginx -t failed (rolled back): %w", err)
 	}
 
-	// One reload
 	if err := mgr.Reload(); err != nil {
 		rollbackFromBackup(mgr, changed)
 		_ = mgr.Reload()
@@ -504,7 +684,6 @@ func applySingle(
 		return nil
 	}
 
-	// disabled => delete live conf (single)
 	if !s.Enabled {
 		ok, err := stageDeleteLiveConf(mgr, d, false)
 		if err != nil {
@@ -543,7 +722,6 @@ func applySingle(
 		return nil
 	}
 
-	// enabled => safe single publish (PublishSiteFromStaging already does test+reload+rollback)
 	td, err := buildTD(s, d)
 	if err != nil {
 		return err
@@ -618,7 +796,6 @@ func rollbackFromBackup(mgr *nginx.Manager, domains []string) {
 	}
 }
 
-// writeFileAtomic writes a file atomically within the same directory.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 
@@ -628,7 +805,6 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	tmpName := tmp.Name()
 
-	// best effort cleanup
 	defer func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
