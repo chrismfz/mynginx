@@ -1,0 +1,19 @@
+# build
+/bin/
+/dist/
+/*.exe
+*.out
+
+# local runtime/state
+config.yaml
+*.db
+*.db-shm
+*.db-wal
+
+# logs
+*.log
+
+# editor
+.vscode/
+.idea/
+.DS_Store
