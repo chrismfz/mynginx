@@ -67,6 +67,27 @@ func main() {
 	fmt.Printf("default     : %s\n", cfg.PHPFPM.DefaultVersion)
 	fmt.Printf("versions    : %d\n", len(cfg.PHPFPM.Versions))
 
+
+
+site := nginx.SiteTemplateData{
+    Domain:      "demo.local",
+    Mode:        "php",
+    Webroot:     "/opt/nginx/html",
+    ACMEWebroot: cfg.Certs.Webroot,
+    EnableHTTP3: true,
+    TLSCert:     "/etc/letsencrypt/live/quic.myip.gr/fullchain.pem",
+    TLSKey:      "/etc/letsencrypt/live/quic.myip.gr/privkey.pem",
+    FrontController: true,
+    PHP: nginx.FastCGICfg{
+        Pass: "unix:/run/php/php8.3-fpm.sock",
+        Cache: nginx.CacheCfg{Enabled: true, Zone: "php_cache", TTL200: "1s"},
+    },
+}
+out, err := mgr.RenderSiteToStaging(site)
+if err != nil { log.Fatalf("render: %v", err) }
+fmt.Println("rendered:", out)
+
+
 	// keep exit code 0
 	os.Exit(0)
 }

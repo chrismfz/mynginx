@@ -1,0 +1,142 @@
+# {{ .Domain }} (managed by NGM)
+
+{{- if eq .Mode "proxy" }}
+upstream up_{{ .UpstreamKey }} {
+    {{- if eq .Proxy.LB "least_conn" }}
+    least_conn;
+    {{- end }}
+    {{- range .Proxy.Targets }}
+    server {{ .Addr }}{{ if gt .Weight 0 }} weight={{ .Weight }}{{ end }};
+    {{- end }}
+    keepalive 32;
+}
+{{- end }}
+
+# HTTP -> HTTPS + ACME challenge
+server {
+    listen 80;
+    server_name {{ .Domain }};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ .ACMEWebroot }};
+        default_type "text/plain";
+        allow all;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS
+server {
+    listen 443 ssl;
+    {{- if .EnableHTTP3 }}
+    listen 443 quic reuseport;
+    {{- end }}
+    server_name {{ .Domain }};
+
+    ssl_certificate     {{ .TLSCert }};
+    ssl_certificate_key {{ .TLSKey }};
+
+    ssl_protocols TLSv1.3;
+    ssl_early_data on;
+
+    {{- if .EnableHTTP3 }}
+    add_header Alt-Svc 'h3=":443"; ma=86400' always;
+    http3 on;
+    {{- end }}
+    http2 on;
+
+    root {{ .Webroot }};
+    index index.php index.html index.htm;
+
+    # Always expose cache status for debugging (fastcgi/proxy)
+    add_header X-Cache-Status $upstream_cache_status always;
+
+    {{- if eq .Mode "php" }}
+
+    {{- if .FrontController }}
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+    {{- else }}
+    location / {
+        try_files $uri $uri/ =404;
+    }
+    {{- end }}
+
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_pass {{ .PHP.Pass }};
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+
+        {{- if .PHP.Cache.Enabled }}
+        # FastCGI cache (zone defined globally via fastcgi_cache_path)
+        set $skip_cache 0;
+        if ($request_method !~ ^(GET|HEAD)$) { set $skip_cache 1; }
+        if ($http_authorization != "") { set $skip_cache 1; }
+        if ($http_cookie ~* "(wordpress_logged_in|PHPSESSID|session|token)") { set $skip_cache 1; }
+        if ($request_uri ~* "(wp-admin|wp-login\.php|cart|checkout|my-account)") { set $skip_cache 1; }
+
+        fastcgi_cache {{ .PHP.Cache.Zone }};
+        fastcgi_cache_valid 200 {{ .PHP.Cache.TTL200 }};
+        fastcgi_cache_use_stale error timeout updating;
+        fastcgi_cache_lock on;
+        fastcgi_cache_bypass $skip_cache;
+        fastcgi_no_cache $skip_cache;
+        {{- end }}
+    }
+
+    {{- else if eq .Mode "proxy" }}
+
+    location / {
+        proxy_http_version 1.1;
+
+        {{- if .Proxy.PassHost }}
+        proxy_set_header Host $host;
+        {{- else }}
+        proxy_set_header Host $http_host;
+        {{- end }}
+
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        {{- if .Proxy.Websockets }}
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        {{- end }}
+
+        proxy_connect_timeout {{ .Proxy.TimeConnect }};
+        proxy_read_timeout    {{ .Proxy.TimeRead }};
+        proxy_send_timeout    {{ .Proxy.TimeSend }};
+
+        {{- if .Proxy.Microcache.Enabled }}
+        # Proxy microcache (zone defined globally via proxy_cache_path)
+        set $skip_cache 0;
+        if ($request_method !~ ^(GET|HEAD)$) { set $skip_cache 1; }
+        if ($http_authorization != "") { set $skip_cache 1; }
+        if ($http_cookie ~* "(wordpress_logged_in|PHPSESSID|session|token)") { set $skip_cache 1; }
+        if ($request_uri ~* "(wp-admin|wp-login\.php|cart|checkout|my-account)") { set $skip_cache 1; }
+
+        proxy_cache {{ .Proxy.Microcache.Zone }};
+        proxy_cache_valid 200 {{ .Proxy.Microcache.TTL200 }};
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_lock on;
+        proxy_cache_bypass $skip_cache;
+        proxy_no_cache $skip_cache;
+        {{- end }}
+
+        proxy_pass http://up_{{ .UpstreamKey }};
+    }
+
+    {{- else }}
+
+    # static
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    {{- end }}
+}
