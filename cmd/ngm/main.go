@@ -70,7 +70,7 @@ func main() {
 
 
 site := nginx.SiteTemplateData{
-    Domain:      "demo.local",
+    Domain:      "quic.myip.gr",
     Mode:        "php",
     Webroot:     "/opt/nginx/html",
     ACMEWebroot: cfg.Certs.Webroot,
@@ -87,6 +87,11 @@ out, err := mgr.RenderSiteToStaging(site)
 if err != nil { log.Fatalf("render: %v", err) }
 fmt.Println("rendered:", out)
 
+
+
+published, err := mgr.PublishSiteFromStaging("quic.myip.gr")
+if err != nil { log.Fatalf("publish: %v", err) }
+fmt.Println("published:", published)
 
 	// keep exit code 0
 	os.Exit(0)
