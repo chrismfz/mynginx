@@ -235,3 +235,15 @@ func (s *Store) DeleteSiteByDomain(domain string) error {
 	_, err := s.db.Exec(`DELETE FROM sites WHERE domain=?`, domain)
 	return err
 }
+
+func (s *Store) DisableSiteByDomain(domain string) error {
+        // soft delete: keep row for audit + pending delete apply
+        _, err := s.db.Exec(`
+                UPDATE sites
+                   SET enabled = 0,
+                       deleted_at = COALESCE(deleted_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE domain = ?
+        `, domain)
+        return err
+}

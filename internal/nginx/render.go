@@ -10,21 +10,21 @@ import (
 	"mynginx/internal/util/atomic"
 )
 
-func (m *Manager) RenderSiteToStaging(site SiteTemplateData) (string, error) {
+func (m *Manager) RenderSiteToStaging(site SiteTemplateData) (string, []byte, error) {
 	if site.Domain == "" {
-		return "", fmt.Errorf("site.Domain is required")
+		return "", nil, fmt.Errorf("site.Domain is required")
 	}
 	if site.Mode == "" {
 		site.Mode = "php"
 	}
 	if site.ACMEWebroot == "" {
-		return "", fmt.Errorf("site.ACMEWebroot is required")
+		return "", nil, fmt.Errorf("site.ACMEWebroot is required")
 	}
 	if site.Webroot == "" {
-		return "", fmt.Errorf("site.Webroot is required")
+		return "", nil, fmt.Errorf("site.Webroot is required")
 	}
 	if site.TLSCert == "" || site.TLSKey == "" {
-		return "", fmt.Errorf("site TLSCert/TLSKey are required")
+		return "", nil, fmt.Errorf("site TLSCert/TLSKey are required")
 	}
 
 	site.UpstreamKey = MakeUpstreamKey(site.Domain)
@@ -32,22 +32,22 @@ func (m *Manager) RenderSiteToStaging(site SiteTemplateData) (string, error) {
 	tplPath := filepath.Join("internal", "nginx", "templates", "site.tmpl")
 	tpl, err := template.ParseFiles(tplPath)
 	if err != nil {
-		return "", fmt.Errorf("parse template %s: %w", tplPath, err)
+		return "", nil, fmt.Errorf("parse template %s: %w", tplPath, err)
 	}
 
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, site); err != nil {
-		return "", fmt.Errorf("execute template: %w", err)
+		return "", nil, fmt.Errorf("execute template: %w", err)
 	}
 
 	outDir := filepath.Join(m.StageDir, "sites")
 	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return "", fmt.Errorf("mkdir %s: %w", outDir, err)
+		return "", nil, fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
 
 	outPath := filepath.Join(outDir, site.Domain+".conf")
 	if err := atomic.WriteFileAtomic(outPath, buf.Bytes(), 0644); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return outPath, nil
+	return outPath, buf.Bytes(), nil
 }

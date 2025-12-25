@@ -10,24 +10,6 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("db is nil")
 	}
 
-	// schema_migrations
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations(
-			version INTEGER PRIMARY KEY
-		);
-	`); err != nil {
-		return err
-	}
-
-	var v int
-	err := db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&v)
-	if err != nil {
-		return err
-	}
-
-	if v >= 1 {
-		return nil
-	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -58,6 +40,23 @@ func migrate(db *sql.DB) error {
 			php_version TEXT NOT NULL DEFAULT '',
 			enable_http3 INTEGER NOT NULL DEFAULT 1,
 			enabled INTEGER NOT NULL DEFAULT 1,
+                        deleted_at TEXT,
+
+			-- TLS / certificate source
+			-- tls_mode: 'letsencrypt' | 'custom' | 'off'
+			tls_mode TEXT NOT NULL DEFAULT 'letsencrypt',
+			tls_cert_path TEXT NOT NULL DEFAULT '',
+			tls_key_path  TEXT NOT NULL DEFAULT '',
+
+			-- Optional per-site overrides (normally global cfg)
+			acme_webroot_override TEXT NOT NULL DEFAULT '',
+			letsencrypt_email_override TEXT NOT NULL DEFAULT '',
+
+			-- Helpful later (UI / renew scheduler). Can be NULL/empty for now.
+			cert_issued_at  TEXT,
+			cert_expires_at TEXT,
+			last_cert_error TEXT NOT NULL DEFAULT '',
+
 
 			last_render_hash TEXT NOT NULL DEFAULT '',
 			last_applied_at TEXT,
@@ -77,6 +76,30 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
+
+	// Proxy targets (for mode=proxy later; supports ip:port and unix:/path.sock)
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS proxy_targets(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			site_id INTEGER NOT NULL,
+			target TEXT NOT NULL,              -- e.g. "127.0.0.1:8080" or "unix:/run/app.sock"
+			weight INTEGER NOT NULL DEFAULT 100,
+			is_backup INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+			UNIQUE(site_id, target),
+			FOREIGN KEY(site_id) REFERENCES sites(id) ON DELETE CASCADE
+		);
+	`); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_proxy_targets_site_id ON proxy_targets(site_id);`); err != nil {
+		return err
+	}
+
+
+
 	// Apply runs (audit-ish)
 	if _, err := tx.Exec(`
 		CREATE TABLE IF NOT EXISTS apply_runs(
@@ -92,9 +115,7 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
-	if _, err := tx.Exec(`INSERT INTO schema_migrations(version) VALUES (1);`); err != nil {
-		return err
-	}
+
 
 	return tx.Commit()
 }

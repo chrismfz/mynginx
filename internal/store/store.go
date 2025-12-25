@@ -37,6 +37,6 @@ type SiteStore interface {
 	UpsertSite(s Site) (Site, error)
 	GetSiteByDomain(domain string) (Site, error)
 	ListSites() ([]Site, error)
-	DeleteSiteByDomain(domain string) error
+        DisableSiteByDomain(domain string) error
 	Close() error
 }
