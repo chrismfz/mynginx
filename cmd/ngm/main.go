@@ -13,8 +13,7 @@ import (
 	"mynginx/internal/store"
 	storesqlite "mynginx/internal/store/sqlite"
 	"mynginx/internal/util/hashx"
-        "mynginx/internal/users"
-
+	"mynginx/internal/users"
 )
 
 var (
@@ -119,13 +118,13 @@ func cmdSite(st store.SiteStore, cfg *config.Config, args []string) error {
 	case "add":
 		fs := flag.NewFlagSet("site add", flag.ContinueOnError)
 		var (
-			user    = fs.String("user", "", "Owner username")
-			domain  = fs.String("domain", "", "Domain (e.g. example.com)")
-			mode    = fs.String("mode", "php", "Mode: php|proxy|static")
-			phpv    = fs.String("php", cfg.PHPFPM.DefaultVersion, "PHP version (e.g. 8.3)")
-			webroot = fs.String("webroot", "", "Webroot path (optional; default derived from user+domain)")
-			http3   = fs.Bool("http3", true, "Enable HTTP/3")
-                        provision = fs.Bool("provision", true, "Create linux user (if missing) + create site dirs")
+			user      = fs.String("user", "", "Owner username")
+			domain    = fs.String("domain", "", "Domain (e.g. example.com)")
+			mode      = fs.String("mode", "php", "Mode: php|proxy|static")
+			phpv      = fs.String("php", cfg.PHPFPM.DefaultVersion, "PHP version (e.g. 8.3)")
+			webroot   = fs.String("webroot", "", "Webroot path (optional; default derived from user+domain)")
+			http3     = fs.Bool("http3", true, "Enable HTTP/3")
+			provision = fs.Bool("provision", true, "Create linux user (if missing) + create site dirs")
 		)
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -148,21 +147,19 @@ func cmdSite(st store.SiteStore, cfg *config.Config, args []string) error {
 			wr = filepath.Join(home, cfg.Hosting.SitesRootName, d, "public")
 		}
 
-
-                // Provision OS user + filesystem layout (so nginx root exists)
-                if *provision {
-                        if err := users.EnsureSystemUser(*user, home); err != nil {
-                                return err
-                        }
-                        webGroup := "www-data"
-                        if cfg.Hosting.WebGroup != "" {
-                                webGroup = cfg.Hosting.WebGroup
-                        }
-                        if _, err := users.EnsureSiteDirs(wr, webGroup); err != nil {
-                                return err
-                        }
-                }
-
+		// Provision OS user + filesystem layout (so nginx root exists)
+		if *provision {
+			if err := users.EnsureSystemUser(*user, home); err != nil {
+				return err
+			}
+			webGroup := "www-data"
+			if cfg.Hosting.WebGroup != "" {
+				webGroup = cfg.Hosting.WebGroup
+			}
+			if _, err := users.EnsureSiteDirs(*user, home, wr, webGroup); err != nil {
+				return err
+			}
+		}
 
 		s, err := st.UpsertSite(store.Site{
 			UserID:      u.ID,
@@ -173,6 +170,7 @@ func cmdSite(st store.SiteStore, cfg *config.Config, args []string) error {
 			EnableHTTP3: *http3,
 			Enabled:     true,
 		})
+
 		if err != nil {
 			return err
 		}
@@ -296,17 +294,10 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 	sqlSt, _ := st.(*storesqlite.Store)
 
 	buildTD := func(s store.Site, d string) (nginx.SiteTemplateData, error) {
-
-                webGroup := "www-data"
-                if cfg.Hosting.WebGroup != "" {
-                        webGroup = cfg.Hosting.WebGroup
-                }
-                // Ensure webroot/logs exist before we generate a vhost pointing there
-                dirs, err := users.EnsureSiteDirs(s.Webroot, webGroup)
-                if err != nil {
-                        return nginx.SiteTemplateData{}, err
-                }
-
+		// Derive site directories from webroot
+		siteRoot := filepath.Dir(s.Webroot)
+		logsDir := filepath.Join(siteRoot, "logs")
+		
 		phpPass := ""
 		if s.Mode == "" || s.Mode == "php" {
 			ver, ok := cfg.PHPFPM.Versions[s.PHPVersion]
@@ -329,10 +320,8 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 			TLSCert:         tlsCert,
 			TLSKey:          tlsKey,
 			FrontController: true,
-
-                        AccessLog: filepath.Join(dirs.Logs, "access.log"),
-                        ErrorLog:  filepath.Join(dirs.Logs, "error.log"),
-
+			AccessLog:       filepath.Join(logsDir, "access.log"),
+			ErrorLog:        filepath.Join(logsDir, "error.log"),
 		}
 
 		if s.Mode == "" || s.Mode == "php" {
@@ -660,4 +649,3 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 	return os.Rename(tmpName, path)
 }
-
