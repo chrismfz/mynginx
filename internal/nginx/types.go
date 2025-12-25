@@ -44,6 +44,10 @@ type SiteTemplateData struct {
 	TLSKey         string
 	FrontController bool
 
+	// Per-site logs (recommended)
+	AccessLog string
+	ErrorLog  string
+
 	PHP   FastCGICfg
 	Proxy ProxyCfg
 
