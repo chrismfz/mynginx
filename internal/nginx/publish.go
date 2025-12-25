@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
+	"bytes"
 	"mynginx/internal/util/atomic"
 	"mynginx/internal/util/execx"
 )
@@ -23,6 +23,15 @@ func (m *Manager) PublishSiteFromStaging(domain string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read staging %s: %w", src, err)
 	}
+
+// If live exists and content is identical, skip publish + reload.
+if live, err := os.ReadFile(dst); err == nil {
+    if bytes.Equal(live, data) {
+        return dst, nil
+    }
+}
+
+
 
 	// Backup current live file (if exists)
 	if _, err := os.Stat(dst); err == nil {
