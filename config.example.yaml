@@ -47,7 +47,7 @@ certs:
   mode: "certbot"
 
   # Email used for Let's Encrypt registration.
-  email: "admin@example.com"
+  email: "admin@myipnetworks.com"
 
   # Webroot used for HTTP-01 challenge files.
   webroot: "/opt/nginx/html"

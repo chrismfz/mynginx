@@ -45,7 +45,6 @@ done
 # Download your Master Config from GitHub
 echo "Downloading master config template..."
 
-mv $NGINX_PATH/conf/nginx.conf $NGINX_PATH/conf/nginx.conf.orig
 curl -sL $MASTER_CONF_URL -o $NGINX_PATH/conf/nginx.conf
 
 
@@ -117,8 +116,7 @@ sudo sh -c 'echo "deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.
 sudo apt-get update
 
 # Install PHP.
-apt install -y php8.3
-apt install -y php8.3-bcmath php8.3-bz2 php8.3-cli php8.3-common php8.3-curl php8.3-dba php8.3-decimal php8.3-dev php8.3-enchant php8.3-fpm php8.3-gd php8.3-grpc php8.3-http php8.3-igbinary php8.3-imagick php8.3-imap php8.3-inotify php8.3-lz4 php8.3-mailparse php8.3-maxminddb php8.3-mbstring php8.3-mcrypt php8.3-memcache php8.3-memcached php8.3-mysql php8.3-opcache php8.3-protobuf php8.3-redis php8.3-rrd php8.3-snmp  php8.3-soap php8.3-sqlite3  php8.3-tidy php8.3-uploadprogress php8.3-uuid php8.3-xml php8.3-xmlrpc  php8.3-yaml php8.3-zip php8.3-zstd
+apt install --no-install-recommends  -y php8.3-bcmath php8.3-bz2 php8.3-cli php8.3-common php8.3-curl php8.3-decimal php8.3-enchant php8.3-fpm php8.3-gd php8.3-grpc php8.3-igbinary php8.3-imagick php8.3-imap php8.3-inotify php8.3-lz4 php8.3-mailparse php8.3-maxminddb php8.3-mbstring php8.3-mcrypt php8.3-memcache php8.3-memcached php8.3-mysql php8.3-opcache php8.3-protobuf php8.3-redis php8.3-rrd php8.3-soap php8.3-sqlite3  php8.3-tidy php8.3-uploadprogress php8.3-uuid php8.3-xml php8.3-xmlrpc  php8.3-yaml php8.3-zip php8.3-zstd
 
 
 systemctl daemon-reload
