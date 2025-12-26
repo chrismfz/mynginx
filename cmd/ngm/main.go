@@ -139,6 +139,7 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 			http3     = fs.Bool("http3", true, "Enable HTTP/3")
 			provision = fs.Bool("provision", true, "Create linux user (if missing) + create site dirs")
 			skipCert  = fs.Bool("skip-cert", false, "Skip automatic certificate issuance")
+                        applyNow  = fs.Bool("apply-now", true, "Apply this vhost immediately (needed for HTTP-01)")
 		)
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -174,26 +175,8 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 			}
 		}
 
-		// Issue certificate automatically (unless skipped)
-		if !*skipCert {
-			fmt.Printf("Issuing certificate for %s...\n", d)
-			certMgr := certs.NewCertbotManager(
-				paths.CertbotBin,
-				paths.ACMEWebroot,
-				paths.LetsEncryptLive,
-				cfg.Certs.Email,
-			)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
 
-			if err := certMgr.EnsureCertExists(ctx, d); err != nil {
-				fmt.Printf("WARNING: Certificate issuance failed: %v\n", err)
-				fmt.Println("You can issue it manually later with: cert issue --domain", d)
-			} else {
-				fmt.Println("Certificate issued successfully!")
-			}
-		}
 
 		s, err := st.UpsertSite(store.Site{
 			UserID:      u.ID,
@@ -216,6 +199,45 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 		fmt.Printf("  webroot: %s\n", s.Webroot)
 		fmt.Printf("  php    : %s\n", s.PHPVersion)
 		fmt.Printf("  http3  : %v\n", s.EnableHTTP3)
+
+                // Bootstrap vhost immediately so HTTP-01 can work (unless disabled).
+                // This will render with self-signed fallback if LE cert is missing.
+                if *applyNow {
+                        if err := cmdApply(st, cfg, paths, []string{"--domain", d}); err != nil {
+                                fmt.Printf("WARNING: apply-now failed for %s: %v\n", d, err)
+                        }
+                }
+
+                // Issue certificate automatically (unless skipped).
+                // Needs nginx serving port 80 for /.well-known/acme-challenge/
+                if !*skipCert {
+                        fmt.Printf("Issuing certificate for %s...\n", d)
+                        certMgr := certs.NewCertbotManager(
+                                paths.CertbotBin,
+                                paths.ACMEWebroot,
+                                paths.LetsEncryptLive,
+                                cfg.Certs.Email,
+                        )
+
+                        ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+                        defer cancel()
+
+                        if err := certMgr.EnsureCertExists(ctx, d); err != nil {
+                                fmt.Printf("WARNING: Certificate issuance failed: %v\n", err)
+                                fmt.Println("You can issue it manually later with: cert issue --domain", d)
+                                return nil
+                        }
+
+                        fmt.Println("Certificate issued successfully!")
+
+                        // Apply again so nginx switches from self-signed fallback -> LE cert
+                        if *applyNow {
+                                if err := cmdApply(st, cfg, paths, []string{"--domain", d}); err != nil {
+                                        fmt.Printf("WARNING: apply-now (post-cert) failed for %s: %v\n", d, err)
+                                }
+                        }
+                }
+
 		return nil
 
 	case "list":
@@ -809,6 +831,26 @@ func applySingle(
 		}
 		return fmt.Errorf("publish: %w", err)
 	}
+
+        // Single-domain apply must also validate and reload nginx (same as bulk apply).
+        if err := mgr.TestConfig(); err != nil {
+                rollbackFromBackup(mgr, []string{d})
+                _ = mgr.Reload()
+                if sqlSt != nil {
+                        _ = sqlSt.UpdateApplyResult(d, "fail", "nginx -t failed (rolled back): "+err.Error(), renderHash)
+                }
+                return fmt.Errorf("nginx -t failed (rolled back): %w", err)
+        }
+
+        if err := mgr.Reload(); err != nil {
+                rollbackFromBackup(mgr, []string{d})
+                _ = mgr.Reload()
+                if sqlSt != nil {
+                        _ = sqlSt.UpdateApplyResult(d, "fail", "nginx reload failed (rolled back): "+err.Error(), renderHash)
+                }
+                return fmt.Errorf("nginx reload failed (rolled back): %w", err)
+        }
+
 
 	if sqlSt != nil {
 		_ = sqlSt.UpdateApplyResult(d, "ok", "", renderHash)

@@ -44,7 +44,10 @@ done
 
 # Download your Master Config from GitHub
 echo "Downloading master config template..."
-curl -sL $MASTER_CONF_URL -o $NGINX_PATH/conf/nginx.conf.master
+
+mv $NGINX_PATH/conf/nginx.conf $NGINX_PATH/conf/nginx.conf.orig
+curl -sL $MASTER_CONF_URL -o $NGINX_PATH/conf/nginx.conf
+
 
 echo "--- 3. Compiling AWS-LC (The Crypto Engine) ---"
 cd $SRC_DIR/aws-lc
@@ -105,47 +108,11 @@ EOF
 systemctl daemon-reload
 
 
-echo "--- 5.5 Bootstrapping SSL (Self-Signed) ---"
-# We create a TEMP directory, NOT the 'live' directory to avoid Certbot's conflict check
-TEMP_SSL="/opt/nginx/temp_ssl"
-mkdir -p $TEMP_SSL
-
-openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
-    -keyout $TEMP_SSL/privkey.pem \
-    -out $TEMP_SSL/fullchain.pem \
-    -subj "/CN=$DOMAIN"
-
-echo "--- 6. Initial Config Deployment ---"
-cp $NGINX_PATH/conf/nginx.conf.master $NGINX_PATH/conf/nginx.conf
-sed -i "s/{{DOMAIN}}/$DOMAIN/g" $NGINX_PATH/conf/nginx.conf
-
-# IMPORTANT: Temporarily point NGINX to the TEMP_SSL folder so it can start
-sed -i "s|/etc/letsencrypt/live/$DOMAIN/|$TEMP_SSL/|g" $NGINX_PATH/conf/nginx.conf
 
 systemctl enable --now nginx
 
-echo "--- 7. SSL Setup (Webroot Mode) ---"
-# Now Certbot will find a clean /etc/letsencrypt/live directory
-certbot certonly --webroot \
-    -w $HTML_PATH \
-    --non-interactive --agree-tos --email "$EMAIL" \
-    --key-type ecdsa \
-    -d "$DOMAIN"
 
-echo "--- 7.5 Switching to Real Certificates ---"
-# Restore the original paths in the config now that the real certs exist
-sed -i "s|$TEMP_SSL/|/etc/letsencrypt/live/$DOMAIN/|g" $NGINX_PATH/conf/nginx.conf
-
-# Reload NGINX to pick up the real ECDSA certificates
-$NGINX_PATH/sbin/nginx -s reload
-
-# Cleanup temp files
-rm -rf $TEMP_SSL
-
-echo "--- 8. Security: Firewall (UFW) ---"
-#TODO#
-
-echo "--- 9. Setting Up Logrotate ---"
+echo "--- Setting Up Logrotate ---"
 cat <<EOF > /etc/logrotate.d/nginx-custom
 $NGINX_PATH/logs/*.log {
     daily
@@ -160,8 +127,6 @@ $NGINX_PATH/logs/*.log {
 }
 EOF
 
-# Final reload to ensure SSL is picked up
-$NGINX_PATH/sbin/nginx -s reload
 
 cd /opt/
 git clone https://github.com/chrismfz/mynginx.git
