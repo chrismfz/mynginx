@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -463,6 +464,49 @@ func trimLen(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// ensureSelfSignedCert creates a per-domain self-signed cert used only as a bootstrap fallback
+// so nginx can start before Let's Encrypt files exist.
+func ensureSelfSignedCert(domain, certPath, keyPath string) error {
+	if fileExists(certPath) && fileExists(keyPath) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(certPath), 0700); err != nil {
+		return fmt.Errorf("mkdir cert dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+		return fmt.Errorf("mkdir key dir: %w", err)
+	}
+
+	// openssl req -x509 -nodes -newkey rsa:2048 -days 7 -subj "/CN=domain" ...
+	cmd := exec.Command(
+		"openssl", "req",
+		"-x509",
+		"-nodes",
+		"-newkey", "rsa:2048",
+		"-days", "7",
+		"-subj", "/CN="+domain,
+		"-keyout", keyPath,
+		"-out", certPath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("generate self-signed cert failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+
+	// nginx master is typically root, so 0600 key is OK; cert can be world-readable.
+	_ = os.Chmod(certPath, 0644)
+	_ = os.Chmod(keyPath, 0600)
+	return nil
+}
+
+
+
 func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	var (
@@ -482,6 +526,8 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 
 	sqlSt, _ := st.(*storesqlite.Store)
 
+	selfSignedRoot := filepath.Join(paths.NginxRoot, "conf", "selfsigned")
+
 	buildTD := func(s store.Site, d string) (nginx.SiteTemplateData, error) {
 		siteRoot := filepath.Dir(s.Webroot)
 		logsDir := filepath.Join(siteRoot, "logs")
@@ -496,14 +542,30 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 			phpPass = "unix:" + phpSock
 		}
 
-		tlsCert := filepath.Join(cfg.Certs.LetsEncryptLive, d, "fullchain.pem")
-		tlsKey := filepath.Join(cfg.Certs.LetsEncryptLive, d, "privkey.pem")
+		// IMPORTANT: keep cert/webroot paths consistent with certbot manager (paths.*)
+		leCert := filepath.Join(paths.LetsEncryptLive, d, "fullchain.pem")
+		leKey := filepath.Join(paths.LetsEncryptLive, d, "privkey.pem")
+
+		tlsCert := leCert
+		tlsKey := leKey
+
+		// Bootstrap: if LE cert isn't there yet, use per-domain self-signed
+		if !fileExists(leCert) || !fileExists(leKey) {
+			fbCert := filepath.Join(selfSignedRoot, d, "fullchain.pem")
+			fbKey := filepath.Join(selfSignedRoot, d, "privkey.pem")
+			if err := ensureSelfSignedCert(d, fbCert, fbKey); err != nil {
+				return nginx.SiteTemplateData{}, err
+			}
+			tlsCert = fbCert
+			tlsKey = fbKey
+		}
+
 
 		td := nginx.SiteTemplateData{
 			Domain:          d,
 			Mode:            s.Mode,
 			Webroot:         s.Webroot,
-			ACMEWebroot:     cfg.Certs.Webroot,
+			ACMEWebroot:     paths.ACMEWebroot,
 			EnableHTTP3:     s.EnableHTTP3,
 			TLSCert:         tlsCert,
 			TLSKey:          tlsKey,
