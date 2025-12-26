@@ -62,10 +62,14 @@ func main() {
 		if err := cmdApply(st, cfg, paths, args[1:]); err != nil {
 			log.Fatalf("apply: %v", err)
 		}
-	case "cert":
-		if err := cmdCert(cfg, paths, args[1:]); err != nil {
-			log.Fatalf("cert: %v", err)
-		}
+
+case "cert":
+    if err := cmdCert(st, cfg, paths, args[1:]); err != nil {
+        log.Fatalf("cert: %v", err)
+    }
+
+
+
 	default:
 		fmt.Printf("Unknown command: %s\n", args[0])
 		fmt.Println("Commands:")
@@ -286,7 +290,7 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 	}
 }
 
-func cmdCert(cfg *config.Config, paths config.Paths, args []string) error {
+func cmdCert(st store.SiteStore, cfg *config.Config, paths config.Paths, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: cert <list|info|issue|renew|check> ...")
 	}
@@ -363,51 +367,73 @@ func cmdCert(cfg *config.Config, paths config.Paths, args []string) error {
 		}
 		return nil
 
-	case "issue":
-		fs := flag.NewFlagSet("cert issue", flag.ContinueOnError)
-		domain := fs.String("domain", "", "Domain")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if *domain == "" {
-			return fmt.Errorf("required: --domain")
-		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
+case "issue":
+    fs := flag.NewFlagSet("cert issue", flag.ContinueOnError)
+    domain := fs.String("domain", "", "Domain")
+    applyNow := fs.Bool("apply", true, "Re-apply nginx config for this domain after successful issuance")
+    if err := fs.Parse(args[1:]); err != nil {
+        return err
+    }
+    if *domain == "" {
+        return fmt.Errorf("required: --domain")
+    }
 
-		fmt.Printf("Issuing certificate for %s...\n", *domain)
-		if err := certMgr.IssueCert(ctx, *domain); err != nil {
-			return err
-		}
-		fmt.Println("Certificate issued successfully!")
-		return nil
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+    defer cancel()
 
-	case "renew":
-		fs := flag.NewFlagSet("cert renew", flag.ContinueOnError)
-		domain := fs.String("domain", "", "Domain (optional, renews all if not specified)")
-		all := fs.Bool("all", false, "Renew all certificates")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
+    fmt.Printf("Issuing certificate for %s...\n", *domain)
+    if err := certMgr.IssueCert(ctx, *domain); err != nil {
+        return err
+    }
+    fmt.Println("Certificate issued successfully!")
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
+    if *applyNow {
+        // This will re-render the vhost and switch from selfsigned -> letsencrypt paths.
+        if err := cmdApply(st, cfg, paths, []string{"--domain", *domain}); err != nil {
+            return fmt.Errorf("cert issued but apply failed: %w", err)
+        }
+    }
+    return nil
 
-		if *all || *domain == "" {
-			fmt.Println("Renewing all certificates...")
-			if err := certMgr.RenewAll(ctx); err != nil {
-				return err
-			}
-			fmt.Println("Renewal complete!")
-		} else {
-			fmt.Printf("Renewing certificate for %s...\n", *domain)
-			if err := certMgr.RenewCert(ctx, *domain); err != nil {
-				return err
-			}
-			fmt.Println("Renewal complete!")
-		}
-		return nil
+
+
+case "renew":
+    fs := flag.NewFlagSet("cert renew", flag.ContinueOnError)
+    domain := fs.String("domain", "", "Domain (optional, renews all if not specified)")
+    all := fs.Bool("all", false, "Renew all certificates")
+    applyNow := fs.Bool("apply", true, "Reload nginx after renewal")
+    if err := fs.Parse(args[1:]); err != nil {
+        return err
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+    defer cancel()
+
+    if *all || *domain == "" {
+        fmt.Println("Renewing all certificates...")
+        if err := certMgr.RenewAll(ctx); err != nil {
+            return err
+        }
+        fmt.Println("Renewal complete!")
+    } else {
+        fmt.Printf("Renewing certificate for %s...\n", *domain)
+        if err := certMgr.RenewCert(ctx, *domain); err != nil {
+            return err
+        }
+        fmt.Println("Renewal complete!")
+    }
+
+    if *applyNow {
+        if err := reloadNginx(paths); err != nil {
+            return err
+        }
+    }
+    return nil
+
+
+
+
 
 	case "check":
 		fs := flag.NewFlagSet("cert check", flag.ContinueOnError)
@@ -928,4 +954,26 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 
 	return os.Rename(tmpName, path)
+}
+
+
+func reloadNginx(paths config.Paths) error {
+    mgr := nginx.NewManager(
+        paths.NginxRoot,
+        paths.NginxBin,
+        paths.NginxMainConf,
+        paths.NginxSitesDir,
+        paths.NginxStageDir,
+        paths.NginxBackupDir,
+    )
+    if err := mgr.EnsureLayout(); err != nil {
+        return fmt.Errorf("nginx layout: %w", err)
+    }
+    if err := mgr.TestConfig(); err != nil {
+        return fmt.Errorf("nginx -t failed: %w", err)
+    }
+    if err := mgr.Reload(); err != nil {
+        return fmt.Errorf("nginx reload failed: %w", err)
+    }
+    return nil
 }
