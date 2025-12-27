@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"mynginx/internal/util/atomic"
+	"mynginx/internal/util"
 )
 
 // RemoveLiveSite removes the live vhost file and keeps a backup in BackupDir.
@@ -27,7 +27,7 @@ func (m *Manager) RemoveLiveSite(domain string) error {
 	if err != nil {
 		return fmt.Errorf("read live %s: %w", dst, err)
 	}
-	if err := atomic.WriteFileAtomic(bak, old, 0644); err != nil {
+	if err := util.WriteFileAtomic(bak, old, 0644); err != nil {
 		return fmt.Errorf("write backup %s: %w", bak, err)
 	}
 

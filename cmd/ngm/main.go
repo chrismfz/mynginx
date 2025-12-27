@@ -16,7 +16,7 @@ import (
 	"mynginx/internal/nginx"
 	"mynginx/internal/store"
 	storesqlite "mynginx/internal/store/sqlite"
-	"mynginx/internal/util/hashx"
+	"mynginx/internal/util"
 	"mynginx/internal/users"
 )
 
@@ -705,7 +705,7 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 		outPath, content, err := mgr.RenderSiteToStaging(td)
 		renderHash := ""
 		if content != nil {
-			renderHash = hashx.Sha256Hex(content)
+			renderHash = util.Sha256Hex(content)
 		}
 		hashes[d] = renderHash
 
@@ -840,7 +840,7 @@ func applySingle(
 	outPath, content, err := mgr.RenderSiteToStaging(td)
 	renderHash := ""
 	if content != nil {
-		renderHash = hashx.Sha256Hex(content)
+		renderHash = util.Sha256Hex(content)
 	}
 	if err != nil {
 		if sqlSt != nil {

@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"time"
 
-	"mynginx/internal/util/execx"
+	"mynginx/internal/util"
 )
 
 func (m *Manager) TestConfig() error {
 	// Use -c explicitly to avoid relying on cwd/defaults.
-	res, err := execx.Run(10*time.Second, m.Bin, "-t", "-c", m.MainConf)
+	res, err := util.Run(10*time.Second, m.Bin, "-t", "-c", m.MainConf)
 
 	// nginx prints most diagnostics on stderr even on success
 	if res.Stdout != "" {

@@ -6,8 +6,7 @@ import (
 	"path/filepath"
 	"time"
 	"bytes"
-	"mynginx/internal/util/atomic"
-	"mynginx/internal/util/execx"
+	"mynginx/internal/util"
 )
 
 func (m *Manager) PublishSiteFromStaging(domain string) (string, error) {
@@ -39,13 +38,13 @@ if live, err := os.ReadFile(dst); err == nil {
 		if err != nil {
 			return "", fmt.Errorf("read live %s: %w", dst, err)
 		}
-		if err := atomic.WriteFileAtomic(bak, old, 0644); err != nil {
+		if err := util.WriteFileAtomic(bak, old, 0644); err != nil {
 			return "", fmt.Errorf("write backup %s: %w", bak, err)
 		}
 	}
 
 	// Publish new file atomically
-	if err := atomic.WriteFileAtomic(dst, data, 0644); err != nil {
+	if err := util.WriteFileAtomic(dst, data, 0644); err != nil {
 		return "", fmt.Errorf("publish %s: %w", dst, err)
 	}
 
@@ -72,7 +71,7 @@ func (m *Manager) rollbackSite(dst, bak string) error {
 		if err != nil {
 			return err
 		}
-		return atomic.WriteFileAtomic(dst, data, 0644)
+		return util.WriteFileAtomic(dst, data, 0644)
 	}
 	_ = os.Remove(dst)
 	return nil
@@ -80,7 +79,7 @@ func (m *Manager) rollbackSite(dst, bak string) error {
 
 func (m *Manager) Reload() error {
 	// MVP: only "signal" for now; we can add systemd mode later using cfg.Nginx.Apply.ReloadMode
-	res, err := execx.Run(10*time.Second, m.Bin, "-s", "reload")
+	res, err := util.Run(10*time.Second, m.Bin, "-s", "reload")
 	if res.Stdout != "" {
 		fmt.Print(res.Stdout)
 	}

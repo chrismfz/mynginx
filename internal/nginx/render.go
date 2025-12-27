@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"text/template"
 
-	"mynginx/internal/util/atomic"
+	"mynginx/internal/util"
 )
 
 func (m *Manager) RenderSiteToStaging(site SiteTemplateData) (string, []byte, error) {
@@ -46,7 +46,7 @@ func (m *Manager) RenderSiteToStaging(site SiteTemplateData) (string, []byte, er
 	}
 
 	outPath := filepath.Join(outDir, site.Domain+".conf")
-	if err := atomic.WriteFileAtomic(outPath, buf.Bytes(), 0644); err != nil {
+	if err := util.WriteFileAtomic(outPath, buf.Bytes(), 0644); err != nil {
 		return "", nil, err
 	}
 	return outPath, buf.Bytes(), nil
