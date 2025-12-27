@@ -17,6 +17,9 @@ server {
     listen 80;
     server_name {{ .Domain }};
 
+    access_log {{ .AccessLog }};
+    error_log  {{ .ErrorLog }};
+
     location ^~ /.well-known/acme-challenge/ {
         root {{ .ACMEWebroot }};
         default_type "text/plain";
@@ -47,6 +50,9 @@ server {
     http3 on;
     {{- end }}
     http2 on;
+
+    access_log {{ .AccessLog }};
+    error_log  {{ .ErrorLog }};
 
     root {{ .Webroot }};
     index index.php index.html index.htm;

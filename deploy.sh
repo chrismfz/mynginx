@@ -22,7 +22,9 @@ echo "--- 2. Fetching Source Code & Master Config ---"
 mkdir -p $SRC_DIR
 mkdir -p $NGINX_PATH/conf
 mkdir -p $NGINX_PATH/conf/sites
+mkdir -p $NGINX_PATH/logs
 mkdir -p $HTML_PATH
+chown www-data:www-data /opt/nginx/logs
 
 # Clone or Update Repos
 declare -A REPOS=(

@@ -10,6 +10,9 @@ http {
     # Generated vhosts (managed by NGM)
     include /opt/nginx/conf/sites/*.conf;
 
+    access_log /opt/nginx/logs/access.log;
+    error_log  /opt/nginx/logs/error.log warn;
+
     include       mime.types;
     default_type  application/octet-stream;
 
