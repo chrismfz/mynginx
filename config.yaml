@@ -60,7 +60,7 @@ certs:
 
 phpfpm:
   # Default PHP version used when a domain does not specify one explicitly.
-  default_version: "8.4"
+  default_version: "8.3"
 
   # Known PHP versions and how to manage them (Sury-style coexistence).
   versions:

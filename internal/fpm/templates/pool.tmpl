@@ -1,0 +1,35 @@
+[{{ .PoolName }}]
+
+user = {{ .User }}
+group = {{ .Group }}
+
+listen = {{ .Socket }}
+listen.owner = {{ .ListenOwner }}
+listen.group = {{ .ListenGroup }}
+listen.mode = 0660
+
+pm = ondemand
+pm.max_children = {{ .MaxChildren }}
+pm.process_idle_timeout = {{ .IdleTimeout }}
+pm.max_requests = {{ .MaxRequests }}
+
+request_terminate_timeout = {{ .RequestTerminateTimeout }}
+request_slowlog_timeout = {{ .SlowlogTimeout }}
+slowlog = {{ .SlowlogPath }}
+
+; Logging
+catch_workers_output = yes
+php_admin_value[error_log] = {{ .ErrorLog }}
+php_admin_flag[log_errors] = on
+
+; Security-ish defaults
+php_admin_flag[expose_php] = off
+php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen
+
+; Optional per-pool php.ini overrides:
+{{- range $k, $v := .PHPAdminValues }}
+php_admin_value[{{ $k }}] = {{ $v }}
+{{- end }}
+{{- range $k, $v := .PHPValues }}
+php_value[{{ $k }}] = {{ $v }}
+{{- end }}

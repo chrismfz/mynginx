@@ -9,9 +9,12 @@ import (
 	"mynginx/internal/util"
 )
 
-func (m *Manager) PublishSiteFromStaging(domain string) (string, error) {
+// Publish copies a staged site config into the live sites directory.
+// It creates/updates a backup file when the live file exists.
+// It returns changed=false if the live file already matches the staged content.
+func (m *Manager) Publish(domain string) (bool, error) {
 	if domain == "" {
-		return "", fmt.Errorf("domain is required")
+		return false, fmt.Errorf("domain is required")
 	}
 
 	src := filepath.Join(m.StageDir, "sites", domain+".conf")
@@ -20,61 +23,36 @@ func (m *Manager) PublishSiteFromStaging(domain string) (string, error) {
 
 	data, err := os.ReadFile(src)
 	if err != nil {
-		return "", fmt.Errorf("read staging %s: %w", src, err)
+		return false, fmt.Errorf("read staging %s: %w", src, err)
 	}
 
-// If live exists and content is identical, skip publish + reload.
-if live, err := os.ReadFile(dst); err == nil {
-    if bytes.Equal(live, data) {
-        return dst, nil
-    }
-}
 
+	// If live exists and content is identical, skip publish.
+	if live, err := os.ReadFile(dst); err == nil {
+		if bytes.Equal(live, data) {
+			return false, nil
+		}
+	}
 
 
 	// Backup current live file (if exists)
 	if _, err := os.Stat(dst); err == nil {
 		old, err := os.ReadFile(dst)
 		if err != nil {
-			return "", fmt.Errorf("read live %s: %w", dst, err)
+			return false, fmt.Errorf("read live %s: %w", dst, err)
 		}
 		if err := util.WriteFileAtomic(bak, old, 0644); err != nil {
-			return "", fmt.Errorf("write backup %s: %w", bak, err)
+			return false, fmt.Errorf("write backup %s: %w", bak, err)
 		}
 	}
 
 	// Publish new file atomically
 	if err := util.WriteFileAtomic(dst, data, 0644); err != nil {
-		return "", fmt.Errorf("publish %s: %w", dst, err)
+		return false, fmt.Errorf("publish %s: %w", dst, err)
 	}
 
-	// Test full nginx config (important: this validates includes + new site)
-	if err := m.TestConfig(); err != nil {
-		// rollback
-		_ = m.rollbackSite(dst, bak)
-		return "", fmt.Errorf("nginx -t failed after publish; rolled back: %w", err)
-	}
 
-	// Reload nginx
-	if err := m.Reload(); err != nil {
-		_ = m.rollbackSite(dst, bak)
-		return "", fmt.Errorf("nginx reload failed; rolled back: %w", err)
-	}
-
-	return dst, nil
-}
-
-func (m *Manager) rollbackSite(dst, bak string) error {
-	// If backup exists, restore it; otherwise remove dst.
-	if _, err := os.Stat(bak); err == nil {
-		data, err := os.ReadFile(bak)
-		if err != nil {
-			return err
-		}
-		return util.WriteFileAtomic(dst, data, 0644)
-	}
-	_ = os.Remove(dst)
-	return nil
+	return true, nil
 }
 
 func (m *Manager) Reload() error {
