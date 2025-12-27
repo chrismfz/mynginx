@@ -23,8 +23,16 @@ mkdir -p $SRC_DIR
 mkdir -p $NGINX_PATH/conf
 mkdir -p $NGINX_PATH/conf/sites
 mkdir -p $NGINX_PATH/logs
+mkdir -p $NGINX_PATH/cache
+mkdir -p $NGINX_PATH/cache/proxy_micro
+mkdir -p $NGINX_PATH/cache/proxy_static
+mkdir -p $NGINX_PATH/cache/fastcgi
+
 mkdir -p $HTML_PATH
-chown www-data:www-data /opt/nginx/logs
+
+chown -R www-data:www-data /opt/nginx/logs
+chown -R www-data:www-data /opt/nginx/cache
+
 
 # Clone or Update Repos
 declare -A REPOS=(

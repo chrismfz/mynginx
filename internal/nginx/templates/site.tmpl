@@ -1,6 +1,7 @@
 # {{ .Domain }} (managed by NGM)
 
 {{- if eq .Mode "proxy" }}
+
 upstream up_{{ .UpstreamKey }} {
     {{- if eq .Proxy.LB "least_conn" }}
     least_conn;
@@ -96,6 +97,42 @@ server {
 
     {{- else if eq .Mode "proxy" }}
 
+    # Static assets cache (long TTL)
+    location ~* \.(?:css|js|mjs|map|jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot|mp4|webm|pdf|zip)$ {
+        proxy_http_version 1.1;
+
+        {{- if .Proxy.PassHost }}
+        proxy_set_header Host $host;
+        {{- else }}
+        proxy_set_header Host $http_host;
+        {{- end }}
+
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout {{ .Proxy.TimeConnect }};
+        proxy_read_timeout    {{ .Proxy.TimeRead }};
+        proxy_send_timeout    {{ .Proxy.TimeSend }};
+
+        {{- if .Proxy.StaticCache.Enabled }}
+        proxy_cache {{ .Proxy.StaticCache.Zone }};
+        proxy_cache_valid 200 301 302 {{ .Proxy.StaticCache.TTL200 }};
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_lock on;
+
+        # Don’t let upstream cookies poison asset cache
+        proxy_ignore_headers Set-Cookie;
+        proxy_hide_header Set-Cookie;
+
+        expires {{ .Proxy.StaticCache.TTL200 }};
+        add_header Cache-Control "public" always;
+        {{- end }}
+
+        proxy_pass http://up_{{ .UpstreamKey }};
+    }
+
+
     location / {
         proxy_http_version 1.1;
 
@@ -130,6 +167,8 @@ server {
         proxy_cache_valid 200 {{ .Proxy.Microcache.TTL200 }};
         proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
         proxy_cache_lock on;
+        proxy_cache_background_update on;
+        proxy_cache_revalidate on;
         proxy_cache_bypass $skip_cache;
         proxy_no_cache $skip_cache;
         {{- end }}

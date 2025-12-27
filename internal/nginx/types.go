@@ -32,6 +32,7 @@ type ProxyCfg struct {
 	TimeSend    string
 
 	Microcache CacheCfg
+        StaticCache CacheCfg
 }
 
 type SiteTemplateData struct {

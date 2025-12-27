@@ -654,6 +654,42 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 			}
 		}
 
+
+        if s.Mode == "proxy" {
+            // Defaults (safe starter values)
+            td.Proxy = nginx.ProxyCfg{
+                LB:          "least_conn",
+                PassHost:    true,
+                Websockets:  false,
+                TimeConnect: "3s",
+                TimeRead:    "60s",
+                TimeSend:    "60s",
+                Microcache: nginx.CacheCfg{
+                    Enabled: true,
+                    Zone:    "proxy_micro",
+                    TTL200:  "1s",
+                },
+                StaticCache: nginx.CacheCfg{
+                    Enabled: true,
+                    Zone:    "proxy_static",
+                    TTL200:  "30d",
+                },
+            }
+
+            if sqlSt == nil {
+                return nginx.SiteTemplateData{}, fmt.Errorf("proxy mode requires sqlite store (to load proxy targets)")
+            }
+            targets, err := sqlSt.ListProxyTargetsBySiteID(s.ID)
+            if err != nil {
+                return nginx.SiteTemplateData{}, fmt.Errorf("load proxy targets: %w", err)
+            }
+            if len(targets) == 0 {
+                return nginx.SiteTemplateData{}, fmt.Errorf("proxy mode requires at least 1 proxy target for %s", d)
+            }
+            td.Proxy.Targets = targets
+        }
+
+
 		return td, nil
 	}
 
