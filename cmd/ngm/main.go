@@ -18,6 +18,8 @@ import (
 	storesqlite "mynginx/internal/store/sqlite"
 	"mynginx/internal/users"
 	"mynginx/internal/util"
+
+	"mynginx/internal/fpm"
 )
 
 var (
@@ -571,8 +573,43 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 			if !ok {
 				return nginx.SiteTemplateData{}, fmt.Errorf("unknown php version %q (not in config.phpfpm.versions)", s.PHPVersion)
 			}
-			phpSock := filepath.Join(ver.SockDir, "php"+s.PHPVersion+"-fpm.sock")
+
+			runUser, ok := inferUserFromWebroot(cfg.Hosting.HomeRoot, s.Webroot)
+			if !ok {
+				return nginx.SiteTemplateData{}, fmt.Errorf("cannot infer site user from webroot %q (expected under %q)", s.Webroot, cfg.Hosting.HomeRoot)
+			}
+			runGroup := runUser
+			webGroup := cfg.Hosting.WebGroup
+			if webGroup == "" {
+				webGroup = "www-data"
+			}
+
+			phpSock := fpm.SocketPath(ver.SockDir, d, s.PHPVersion)
+
+			poolTD := fpm.PoolData{
+				PoolName:               "ngm_" + strings.ReplaceAll(d, ".", "_"),
+				RunUser:                runUser,
+				RunGroup:               runGroup,
+				Socket:                 phpSock,
+				ListenOwner:            runUser,
+				ListenGroup:            webGroup,
+				MaxChildren:            10,
+				IdleTimeout:            "10s",
+				MaxRequests:            500,
+				RequestTerminateTimeout: "60s",
+				SlowlogTimeout:         "5s",
+				SlowlogPath:            filepath.Join(logsDir, "php-fpm.slow.log"),
+				ErrorLog:               filepath.Join(logsDir, "php-fpm.error.log"),
+				PHPAdminValues:         map[string]string{},
+				PHPValues:              map[string]string{},
+			}
+
+				if _, _, err := fpm.EnsurePool(ver.PoolsDir, ver.Service, ver.SockDir, d, s.PHPVersion, poolTD); err != nil {
+				return nginx.SiteTemplateData{}, fmt.Errorf("ensure fpm pool: %w", err)
+			}
+
 			phpPass = "unix:" + phpSock
+
 		}
 
 		// IMPORTANT: keep cert/webroot paths consistent with certbot manager (paths.*)
@@ -949,4 +986,21 @@ func reloadNginx(paths config.Paths) error {
 		return fmt.Errorf("nginx reload failed: %w", err)
 	}
 	return nil
+}
+
+func inferUserFromWebroot(homeRoot, webroot string) (string, bool) {
+	homeRoot = strings.TrimRight(homeRoot, "/")
+	if homeRoot == "" {
+		return "", false
+	}
+	prefix := homeRoot + "/"
+	if !strings.HasPrefix(webroot, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(webroot, prefix)
+	parts := strings.Split(rest, "/")
+	if len(parts) < 1 || parts[0] == "" {
+		return "", false
+	}
+	return parts[0], true
 }

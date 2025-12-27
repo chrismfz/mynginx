@@ -3,9 +3,10 @@ package fpm
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"path/filepath"
 	"text/template"
+
+	"mynginx/internal/util"
 )
 
 type PoolData struct {
@@ -20,6 +21,10 @@ type PoolData struct {
 	IdleTimeout string
 	MaxRequests int
 
+	RequestTerminateTimeout string
+	SlowlogTimeout          string
+	SlowlogPath             string
+
 	ErrorLog string
 
 	PHPAdminValues map[string]string
@@ -31,9 +36,13 @@ type PoolManager struct {
 }
 
 func (m *PoolManager) Render(td PoolData) ([]byte, error) {
-	tpl, err := template.ParseFiles(m.TemplatePath)
+	tplPath := m.TemplatePath
+	if tplPath == "" {
+		tplPath = filepath.Join("internal", "fpm", "templates", "pool.tmpl")
+	}
+	tpl, err := template.ParseFiles(tplPath)
 	if err != nil {
-		return nil, fmt.Errorf("parse pool template: %w", err)
+		return nil, fmt.Errorf("parse pool template %s: %w", tplPath, err)
 	}
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, td); err != nil {
@@ -42,27 +51,12 @@ func (m *PoolManager) Render(td PoolData) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func WriteAtomic(path string, data []byte, perm os.FileMode) error {
+
+func writePoolFileAtomic(path string, data []byte) error {
+	// util.WriteFileAtomic requires parent dir to exist.
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := util.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = tmp.Close(); _ = os.Remove(tmpName) }()
-
-	if err := tmp.Chmod(perm); err != nil {
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return util.WriteFileAtomic(path, data, 0644)
 }

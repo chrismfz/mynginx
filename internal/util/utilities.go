@@ -14,8 +14,23 @@ import (
 
 )
 
+// MkdirAll is a small wrapper so callers can use util.MkdirAll consistently.
+func MkdirAll(dir string, perm os.FileMode) error {
+        if dir == "" || dir == "." {
+                return nil
+        }
+        if err := os.MkdirAll(dir, perm); err != nil {
+                return fmt.Errorf("mkdirall %s: %w", dir, err)
+        }
+        return nil
+}
+
+
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
         dir := filepath.Dir(path)
+        if err := MkdirAll(dir, 0755); err != nil {
+                return err
+        }
         tmp, err := os.CreateTemp(dir, ".tmp-*")
         if err != nil {
                 return fmt.Errorf("create temp in %s: %w", dir, err)
