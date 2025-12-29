@@ -117,5 +117,30 @@ func migrate(db *sql.DB) error {
 
 
 
+
+
+	// Panel users (NGM UI/API login)
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS panel_users(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'admin',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			last_login_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		);
+	`); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_panel_users_username ON panel_users(username);`); err != nil {
+		return err
+	}
+
+
+
+
 	return tx.Commit()
 }

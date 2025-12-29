@@ -6,20 +6,23 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"mynginx/internal/certs"
 	"mynginx/internal/config"
 	"mynginx/internal/nginx"
 	"mynginx/internal/store"
 	storesqlite "mynginx/internal/store/sqlite"
-	"mynginx/internal/users"
 	"mynginx/internal/util"
 
-	"mynginx/internal/fpm"
+	"mynginx/internal/app"
+
+	"mynginx/internal/web"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 var (
@@ -56,6 +59,11 @@ func main() {
 	}
 
 	switch args[0] {
+	case "serve":
+		if err := cmdServe(st, cfg, paths); err != nil {
+			log.Fatalf("serve: %v", err)
+		}
+
 	case "site":
 		if err := cmdSite(st, cfg, paths, args[1:]); err != nil {
 			log.Fatalf("site: %v", err)
@@ -70,10 +78,17 @@ func main() {
 			log.Fatalf("cert: %v", err)
 		}
 
+	case "panel-user":
+		if err := cmdPanelUser(st, args[1:]); err != nil {
+			log.Fatalf("panel-user: %v", err)
+		}
+
 	default:
 		fmt.Printf("Unknown command: %s\n", args[0])
 		fmt.Println("Commands:")
-		fmt.Println("  site add --user <u> --domain <d> [--mode php|proxy|static] [--php 8.3] [--webroot <path>] [--http3=true|false] [--skip-cert]")
+		fmt.Println("  serve                                (start local UI on cfg.api.listen)")
+		fmt.Println("  site add --user <u> --domain <d> [--mode php|proxy|static] [--php 8.3] [--webroot <path>] [--http3=true|false] [--skip-cert] [--apply-now=true|false]")
+		fmt.Println("  site edit --domain <d> [--user <u>] [--mode php|proxy|static] [--php 8.3] [--webroot <path>] [--http3=true|false] [--enabled=true|false] [--apply-now=true|false]")
 		fmt.Println("  site list")
 		fmt.Println("  site rm --domain <d>")
 		fmt.Println("  apply [--domain <d>] [--all] [--dry-run] [--limit N]")
@@ -82,9 +97,59 @@ func main() {
 		fmt.Println("  cert issue --domain <d>            (issue/renew certificate)")
 		fmt.Println("  cert renew [--domain <d>] [--all] (renew expiring certs)")
 		fmt.Println("  cert check [--days 30]             (check expiring soon)")
+		fmt.Println("  panel-user add --user <u> --pass <p> [--role admin] [--enabled=true|false]")
 		os.Exit(2)
 	}
 }
+
+
+func cmdServe(st store.SiteStore, cfg *config.Config, paths config.Paths) error {
+	srv, err := web.New(cfg, paths, st)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	fmt.Println("NGM UI listening on:", cfg.API.Listen)
+	fmt.Println("Open: http://" + cfg.API.Listen + "/ui/login")
+	return srv.Serve(ctx, cfg.API.Listen)
+}
+
+func cmdPanelUser(st store.SiteStore, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: panel-user add --user <u> --pass <p> [--role admin] [--enabled=true|false]")
+	}
+	switch args[0] {
+	case "add":
+		fs := flag.NewFlagSet("panel-user add", flag.ContinueOnError)
+		user := fs.String("user", "", "Username")
+		pass := fs.String("pass", "", "Password")
+		role := fs.String("role", "admin", "Role")
+		enabled := fs.Bool("enabled", true, "Enabled")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*user) == "" || *pass == "" {
+			return fmt.Errorf("required: --user and --pass")
+		}
+
+		hash, err := bcrypt.GenerateFromPassword([]byte(*pass), bcrypt.DefaultCost)
+		if err != nil {
+			return err
+		}
+		pu, err := st.CreatePanelUser(strings.TrimSpace(*user), string(hash), strings.TrimSpace(*role), *enabled)
+		if err != nil {
+			return err
+		}
+		fmt.Println("OK: panel user saved:", pu.Username)
+		return nil
+	default:
+		return fmt.Errorf("unknown panel-user subcommand: %s", args[0])
+	}
+}
+
+
+
 
 func runStatus(cfg *config.Config, paths config.Paths) {
 	fmt.Println("NGM config loaded OK")
@@ -131,6 +196,11 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 		return fmt.Errorf("usage: site <add|list|rm> ...")
 	}
 
+	core, err := app.New(cfg, paths, st)
+	if err != nil {
+		return err
+	}
+
 	switch args[0] {
 	case "add":
 		fs := flag.NewFlagSet("site add", flag.ContinueOnError)
@@ -152,47 +222,22 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 			return fmt.Errorf("required: --user and --domain")
 		}
 
-		d := strings.ToLower(strings.TrimSpace(*domain))
-		home := filepath.Join(cfg.Hosting.HomeRoot, *user)
-
-		u, err := st.EnsureUser(*user, home)
-		if err != nil {
-			return err
-		}
-
-		wr := *webroot
-		if wr == "" {
-			wr = filepath.Join(home, cfg.Hosting.SitesRootName, d, "public")
-		}
-
-		// Provision OS user + filesystem layout
-		if *provision {
-			if err := users.EnsureSystemUser(*user, home); err != nil {
-				return err
-			}
-			webGroup := "www-data"
-			if cfg.Hosting.WebGroup != "" {
-				webGroup = cfg.Hosting.WebGroup
-			}
-			if _, err := users.EnsureSiteDirs(*user, home, wr, webGroup); err != nil {
-				return err
-			}
-		}
-
-		s, err := st.UpsertSite(store.Site{
-			UserID:      u.ID,
-			Domain:      d,
-			Mode:        *mode,
-			Webroot:     wr,
-			PHPVersion:  *phpv,
-			EnableHTTP3: *http3,
-			Enabled:     true,
+		res, err := core.SiteAdd(context.Background(), app.SiteAddRequest{
+			User:      *user,
+			Domain:    *domain,
+			Mode:      *mode,
+			PHP:       *phpv,
+			Webroot:   *webroot,
+			HTTP3:     *http3,
+			Provision: *provision,
+			SkipCert:  *skipCert,
+			ApplyNow:  *applyNow,
 		})
-
 		if err != nil {
 			return err
 		}
 
+		s := res.Site
 		fmt.Println("OK: site saved")
 		fmt.Printf("  domain : %s\n", s.Domain)
 		fmt.Printf("  user_id: %d\n", s.UserID)
@@ -200,53 +245,27 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 		fmt.Printf("  webroot: %s\n", s.Webroot)
 		fmt.Printf("  php    : %s\n", s.PHPVersion)
 		fmt.Printf("  http3  : %v\n", s.EnableHTTP3)
-
-		// Bootstrap vhost immediately so HTTP-01 can work (unless disabled).
-		// This will render with self-signed fallback if LE cert is missing.
-		if *applyNow {
-			if err := cmdApply(st, cfg, paths, []string{"--domain", d}); err != nil {
-				fmt.Printf("WARNING: apply-now failed for %s: %v\n", d, err)
-			}
+		for _, w := range res.Warnings {
+			fmt.Println("WARNING:", w)
 		}
-
-		// Issue certificate automatically (unless skipped).
-		// Needs nginx serving port 80 for /.well-known/acme-challenge/
-		if !*skipCert {
-			fmt.Printf("Issuing certificate for %s...\n", d)
-			certMgr := certs.NewCertbotManager(
-				paths.CertbotBin,
-				paths.ACMEWebroot,
-				paths.LetsEncryptLive,
-				cfg.Certs.Email,
-			)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-
-			if err := certMgr.EnsureCertExists(ctx, d); err != nil {
-				fmt.Printf("WARNING: Certificate issuance failed: %v\n", err)
-				fmt.Println("You can issue it manually later with: cert issue --domain", d)
-				return nil
-			}
-
-			fmt.Println("Certificate issued successfully!")
-
-			// Apply again so nginx switches from self-signed fallback -> LE cert
-			if *applyNow {
-				if err := cmdApply(st, cfg, paths, []string{"--domain", d}); err != nil {
-					fmt.Printf("WARNING: apply-now (post-cert) failed for %s: %v\n", d, err)
-				}
-			}
-		}
-
 		return nil
 
+
+
+
+
+
+
+
+
+
+
 	case "list":
-		sites, err := st.ListSites()
+		items, err := core.SiteList(context.Background())
 		if err != nil {
 			return err
 		}
-		if len(sites) == 0 {
+		if len(items) == 0 {
 			fmt.Println("(no sites)")
 			return nil
 		}
@@ -254,16 +273,19 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 		fmt.Printf("%-25s  %-6s  %-5s  %-9s  %-10s  %-20s  %-40s  %s\n",
 			"DOMAIN", "MODE", "HTTP3", "ENABLED", "STATE", "LAST_APPLIED", "WEBROOT", "PHP")
 
-		for _, s := range sites {
+		for _, it := range items {
+			s := it.Site
 			enabledStr := "yes"
 			if !s.Enabled {
 				enabledStr = "no"
 			}
-			state, last := siteState(s)
 			fmt.Printf("%-25s  %-6s  %-5v  %-9s  %-10s  %-20s  %-40s  %s\n",
-				s.Domain, s.Mode, s.EnableHTTP3, enabledStr, state, last, trimLen(s.Webroot, 40), s.PHPVersion)
+				s.Domain, s.Mode, s.EnableHTTP3, enabledStr, it.State, it.Last, trimLen(s.Webroot, 40), s.PHPVersion)
 		}
 		return nil
+
+
+
 
 	case "rm":
 		fs := flag.NewFlagSet("site rm", flag.ContinueOnError)
@@ -274,13 +296,63 @@ func cmdSite(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 		if *domain == "" {
 			return fmt.Errorf("required: --domain")
 		}
-		d := strings.ToLower(strings.TrimSpace(*domain))
-
-		if err := st.DisableSiteByDomain(d); err != nil {
-			return err
-		}
-		fmt.Println("OK: site disabled (pending delete):", d)
+		if err := core.SiteDisable(context.Background(), *domain); err != nil { return err }
+                d := strings.ToLower(strings.TrimSpace(*domain))
+                fmt.Println("OK: site disabled (pending delete):", d)
 		return nil
+
+
+
+	case "edit":
+		fs := flag.NewFlagSet("site edit", flag.ContinueOnError)
+		var (
+			domain  = fs.String("domain", "", "Domain (required)")
+			user    = fs.String("user", "", "Owner username (optional)")
+			mode    = fs.String("mode", "", "Mode: php|proxy|static (optional)")
+			phpv    = fs.String("php", "", "PHP version (optional)")
+			webroot = fs.String("webroot", "", "Webroot (optional)")
+			http3S  = fs.String("http3", "", "Enable HTTP/3: true|false (optional)")
+			enS     = fs.String("enabled", "", "Enabled: true|false (optional)")
+			applyNow = fs.Bool("apply-now", false, "Apply immediately after edit")
+		)
+		if err := fs.Parse(args[1:]); err != nil { return err }
+		if strings.TrimSpace(*domain) == "" { return fmt.Errorf("required: --domain") }
+
+		var http3 *bool
+		if strings.TrimSpace(*http3S) != "" {
+			v := strings.EqualFold(strings.TrimSpace(*http3S), "true") || strings.TrimSpace(*http3S) == "1"
+			http3 = &v
+		}
+		var enabled *bool
+		if strings.TrimSpace(*enS) != "" {
+			v := strings.EqualFold(strings.TrimSpace(*enS), "true") || strings.TrimSpace(*enS) == "1"
+			enabled = &v
+		}
+
+		updated, err := core.SiteEdit(context.Background(), app.SiteEditRequest{
+			Domain: *domain,
+			User: *user,
+			Mode: *mode,
+			PHP: *phpv,
+			Webroot: *webroot,
+			HTTP3: http3,
+			Enabled: enabled,
+			ApplyNow: *applyNow,
+		})
+		if err != nil { return err }
+		fmt.Println("OK: site updated")
+		fmt.Printf("  domain : %s\n", updated.Domain)
+		fmt.Printf("  user_id: %d\n", updated.UserID)
+		fmt.Printf("  mode   : %s\n", updated.Mode)
+		fmt.Printf("  webroot: %s\n", updated.Webroot)
+		fmt.Printf("  php    : %s\n", updated.PHPVersion)
+		fmt.Printf("  http3  : %v\n", updated.EnableHTTP3)
+		fmt.Printf("  enabled: %v\n", updated.Enabled)
+		return nil
+
+
+
+
 
 	default:
 		return fmt.Errorf("unknown site subcommand: %s", args[0])
@@ -292,16 +364,12 @@ func cmdCert(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 		return fmt.Errorf("usage: cert <list|info|issue|renew|check> ...")
 	}
 
-	certMgr := certs.NewCertbotManager(
-		paths.CertbotBin,
-		paths.ACMEWebroot,
-		paths.LetsEncryptLive,
-		cfg.Certs.Email,
-	)
+	core, err := app.New(cfg, paths, st)
+	if err != nil { return err }
 
 	switch args[0] {
 	case "list":
-		certList, err := certMgr.ListCerts()
+		certList, err := core.CertList()
 		if err != nil {
 			return err
 		}
@@ -337,12 +405,12 @@ func cmdCert(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 			return fmt.Errorf("required: --domain")
 		}
 
-		info, err := certMgr.GetCertInfo(*domain)
+		info, err := core.CertInfo(*domain)
 		if err != nil {
 			return err
 		}
 
-		if !info.Exists {
+                if info == nil || !info.Exists {
 			fmt.Printf("Certificate does not exist for: %s\n", *domain)
 			return nil
 		}
@@ -379,17 +447,9 @@ func cmdCert(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 		defer cancel()
 
 		fmt.Printf("Issuing certificate for %s...\n", *domain)
-		if err := certMgr.IssueCert(ctx, *domain); err != nil {
-			return err
-		}
+		if err := core.CertIssue(ctx, *domain, *applyNow); err != nil { return err }
 		fmt.Println("Certificate issued successfully!")
 
-		if *applyNow {
-			// This will re-render the vhost and switch from selfsigned -> letsencrypt paths.
-			if err := cmdApply(st, cfg, paths, []string{"--domain", *domain}); err != nil {
-				return fmt.Errorf("cert issued but apply failed: %w", err)
-			}
-		}
 		return nil
 
 	case "renew":
@@ -404,25 +464,8 @@ func cmdCert(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
-		if *all || *domain == "" {
-			fmt.Println("Renewing all certificates...")
-			if err := certMgr.RenewAll(ctx); err != nil {
-				return err
-			}
-			fmt.Println("Renewal complete!")
-		} else {
-			fmt.Printf("Renewing certificate for %s...\n", *domain)
-			if err := certMgr.RenewCert(ctx, *domain); err != nil {
-				return err
-			}
-			fmt.Println("Renewal complete!")
-		}
-
-		if *applyNow {
-			if err := reloadNginx(paths); err != nil {
-				return err
-			}
-		}
+		if err := core.CertRenew(ctx, strings.TrimSpace(*domain), *all, *applyNow); err != nil { return err }
+		fmt.Println("Renewal complete!")
 		return nil
 
 	case "check":
@@ -432,7 +475,7 @@ func cmdCert(st store.SiteStore, cfg *config.Config, paths config.Paths, args []
 			return err
 		}
 
-		expiring, err := certMgr.CheckExpiringSoon(*days)
+		expiring, err := core.CertCheck(*days)
 		if err != nil {
 			return err
 		}
@@ -554,280 +597,61 @@ func cmdApply(st store.SiteStore, cfg *config.Config, paths config.Paths, args [
 		return err
 	}
 
-	mgr := nginx.NewManager(paths.NginxRoot, paths.NginxBin, paths.NginxMainConf, paths.NginxSitesDir, paths.NginxStageDir, paths.NginxBackupDir)
-	if err := mgr.EnsureLayout(); err != nil {
-		return fmt.Errorf("nginx layout: %w", err)
-	}
-
-	sqlSt, _ := st.(*storesqlite.Store)
-
-	selfSignedRoot := filepath.Join(paths.NginxRoot, "conf", "selfsigned")
-
-	buildTD := func(s store.Site, d string) (nginx.SiteTemplateData, error) {
-		siteRoot := filepath.Dir(s.Webroot)
-		logsDir := filepath.Join(siteRoot, "logs")
-
-		phpPass := ""
-		if s.Mode == "" || s.Mode == "php" {
-			ver, ok := cfg.PHPFPM.Versions[s.PHPVersion]
-			if !ok {
-				return nginx.SiteTemplateData{}, fmt.Errorf("unknown php version %q (not in config.phpfpm.versions)", s.PHPVersion)
-			}
-
-			runUser, ok := inferUserFromWebroot(cfg.Hosting.HomeRoot, s.Webroot)
-			if !ok {
-				return nginx.SiteTemplateData{}, fmt.Errorf("cannot infer site user from webroot %q (expected under %q)", s.Webroot, cfg.Hosting.HomeRoot)
-			}
-			runGroup := runUser
-			webGroup := cfg.Hosting.WebGroup
-			if webGroup == "" {
-				webGroup = "www-data"
-			}
-
-			phpSock := fpm.SocketPath(ver.SockDir, d, s.PHPVersion)
-
-			poolTD := fpm.PoolData{
-				PoolName:               "ngm_" + strings.ReplaceAll(d, ".", "_"),
-				RunUser:                runUser,
-				RunGroup:               runGroup,
-				Socket:                 phpSock,
-				ListenOwner:            runUser,
-				ListenGroup:            webGroup,
-				MaxChildren:            10,
-				IdleTimeout:            "10s",
-				MaxRequests:            500,
-				RequestTerminateTimeout: "60s",
-				SlowlogTimeout:         "5s",
-				SlowlogPath:            filepath.Join(logsDir, "php-fpm.slow.log"),
-				ErrorLog:               filepath.Join(logsDir, "php-fpm.error.log"),
-				PHPAdminValues:         map[string]string{},
-				PHPValues:              map[string]string{},
-			}
-
-				if _, _, err := fpm.EnsurePool(ver.PoolsDir, ver.Service, ver.SockDir, d, s.PHPVersion, poolTD); err != nil {
-				return nginx.SiteTemplateData{}, fmt.Errorf("ensure fpm pool: %w", err)
-			}
-
-			phpPass = "unix:" + phpSock
-
-		}
-
-		// IMPORTANT: keep cert/webroot paths consistent with certbot manager (paths.*)
-		leCert := filepath.Join(paths.LetsEncryptLive, d, "fullchain.pem")
-		leKey := filepath.Join(paths.LetsEncryptLive, d, "privkey.pem")
-
-		tlsCert := leCert
-		tlsKey := leKey
-
-		// Bootstrap: if LE cert isn't there yet, use per-domain self-signed
-		if !fileExists(leCert) || !fileExists(leKey) {
-			fbCert := filepath.Join(selfSignedRoot, d, "fullchain.pem")
-			fbKey := filepath.Join(selfSignedRoot, d, "privkey.pem")
-			if err := ensureSelfSignedCert(d, fbCert, fbKey); err != nil {
-				return nginx.SiteTemplateData{}, err
-			}
-			tlsCert = fbCert
-			tlsKey = fbKey
-		}
-
-		td := nginx.SiteTemplateData{
-			Domain:          d,
-			Mode:            s.Mode,
-			Webroot:         s.Webroot,
-			ACMEWebroot:     paths.ACMEWebroot,
-			EnableHTTP3:     s.EnableHTTP3,
-			TLSCert:         tlsCert,
-			TLSKey:          tlsKey,
-			FrontController: true,
-			AccessLog:       filepath.Join(logsDir, "access.log"),
-			ErrorLog:        filepath.Join(logsDir, "error.log"),
-		}
-
-		if s.Mode == "" || s.Mode == "php" {
-			td.PHP = nginx.FastCGICfg{
-				Pass: phpPass,
-				Cache: nginx.CacheCfg{
-					Enabled: true,
-					Zone:    "php_cache",
-					TTL200:  "1s",
-				},
-			}
-		}
 
 
-        if s.Mode == "proxy" {
-            // Defaults (safe starter values)
-            td.Proxy = nginx.ProxyCfg{
-                LB:          "least_conn",
-                PassHost:    true,
-                Websockets:  false,
-                TimeConnect: "3s",
-                TimeRead:    "60s",
-                TimeSend:    "60s",
-                Microcache: nginx.CacheCfg{
-                    Enabled: true,
-                    Zone:    "proxy_micro",
-                    TTL200:  "1s",
-                },
-                StaticCache: nginx.CacheCfg{
-                    Enabled: true,
-                    Zone:    "proxy_static",
-                    TTL200:  "30d",
-                },
-            }
-
-            if sqlSt == nil {
-                return nginx.SiteTemplateData{}, fmt.Errorf("proxy mode requires sqlite store (to load proxy targets)")
-            }
-            targets, err := sqlSt.ListProxyTargetsBySiteID(s.ID)
-            if err != nil {
-                return nginx.SiteTemplateData{}, fmt.Errorf("load proxy targets: %w", err)
-            }
-            if len(targets) == 0 {
-                return nginx.SiteTemplateData{}, fmt.Errorf("proxy mode requires at least 1 proxy target for %s", d)
-            }
-            td.Proxy.Targets = targets
-        }
-
-
-		return td, nil
-	}
-
-	if strings.TrimSpace(*domain) != "" {
-		return applySingle(mgr, st, cfg, sqlSt, buildTD, *domain, *dry)
-	}
-
-	sites, err := st.ListSites()
+	core, err := app.New(cfg, paths, st)
 	if err != nil {
 		return err
 	}
 
-	var (
-		changed []string
-		hashes  = map[string]string{}
-	)
+	res, applyErr := core.Apply(context.Background(), app.ApplyRequest{
+		Domain: *domain,
+		All:    *all,
+		DryRun: *dry,
+		Limit:  *limit,
+	})
 
-	appliedCount := 0
-	for _, s := range sites {
-		if *limit > 0 && appliedCount >= *limit {
-			break
-		}
-
-		d := strings.ToLower(strings.TrimSpace(s.Domain))
-
-		if !s.Enabled {
-			if *dry {
-				fmt.Println("dry-run delete:", d)
-				appliedCount++
-				continue
-			}
-
-			ok, err := stageDeleteLiveConf(mgr, d, false)
-			if err != nil {
-				if sqlSt != nil {
-					_ = sqlSt.UpdateApplyResult(d, "fail", "delete live conf failed: "+err.Error(), "")
-				}
-				fmt.Println("FAIL delete:", d, "-", err)
-				continue
-			}
-			if !ok {
-				continue
-			}
-			fmt.Println("staged delete:", d)
-			changed = append(changed, d)
-			hashes[d] = ""
-			appliedCount++
-			continue
-		}
-
-		if !*all && !siteNeedsApply(s) {
-			continue
-		}
-
-		if *dry {
-			fmt.Println("dry-run apply:", d)
-			appliedCount++
-			continue
-		}
-
-		td, err := buildTD(s, d)
-		if err != nil {
-			if sqlSt != nil {
-				_ = sqlSt.UpdateApplyResult(d, "fail", err.Error(), "")
-			}
-			fmt.Println("SKIP:", d, "-", err)
-			continue
-		}
-
-		outPath, content, err := mgr.RenderSiteToStaging(td)
-		renderHash := ""
-		if content != nil {
-			renderHash = util.Sha256Hex(content)
-		}
-		hashes[d] = renderHash
-
-		if err != nil {
-			if sqlSt != nil {
-				_ = sqlSt.UpdateApplyResult(d, "fail", err.Error(), renderHash)
-			}
-			fmt.Println("FAIL render:", d, "-", err)
-			continue
-		}
-		fmt.Println("rendered:", outPath)
-
-		changedNow, err := mgr.Publish(d)
-		if err != nil {
-			if sqlSt != nil {
-				_ = sqlSt.UpdateApplyResult(d, "fail", err.Error(), renderHash)
-			}
-			fmt.Println("FAIL publish:", d, "-", err)
-			continue
-		}
-
-		if !changedNow {
-			// Nothing changed on disk; we can safely mark as applied without an nginx reload.
-			if sqlSt != nil {
-				_ = sqlSt.UpdateApplyResult(d, "ok", "", renderHash)
-			}
-			appliedCount++
-			continue
-		}
-
-		changed = append(changed, d)
-		appliedCount++
-	}
-
+	// CLI-friendly output (kept simple; API/UI will just use the returned structs)
 	if *dry {
+		for _, r := range res.Domains {
+			switch r.Action {
+			case "apply":
+				fmt.Println("dry-run apply:", r.Domain)
+			case "delete":
+				fmt.Println("dry-run delete:", r.Domain)
+			}
+		}
 		fmt.Println("dry-run done.")
 		return nil
 	}
-	if len(changed) == 0 {
-		if appliedCount > 0 {
-			fmt.Println("Applied OK (no nginx reload needed).")
-		} else {
-			fmt.Println("Nothing to apply (no pending changes).")
+
+	// Show per-domain failures (if any) before returning error
+	for _, r := range res.Domains {
+		if r.Status == "fail" {
+			fmt.Println("FAIL:", r.Domain, "-", r.Error)
 		}
+	}
+
+	if applyErr != nil {
+		return applyErr
+	}
+
+	if len(res.Changed) == 0 {
+		fmt.Println("Nothing to apply (no pending changes).")
 		return nil
 	}
 
-	if err := mgr.TestConfig(); err != nil {
-		rollbackFromBackup(mgr, changed)
-		_ = mgr.Reload()
-		for _, d := range changed {
-			if sqlSt != nil {
-				_ = sqlSt.UpdateApplyResult(d, "fail", "nginx -t failed (rolled back): "+err.Error(), hashes[d])
-			}
-		}
-		return fmt.Errorf("nginx -t failed (rolled back): %w", err)
-	}
-
-	for _, d := range changed {
-		if sqlSt != nil {
-			_ = sqlSt.UpdateApplyResult(d, "ok", "", hashes[d])
-		}
-	}
-	fmt.Printf("Applied OK (%d): %s\n", len(changed), strings.Join(changed, ", "))
+	fmt.Printf("Applied OK (%d): %s\n", len(res.Changed), strings.Join(res.Changed, ", "))
 	return nil
+
+
+
+
+
+
+
+
+
 }
 
 func applySingle(

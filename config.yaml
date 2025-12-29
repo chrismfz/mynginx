@@ -4,7 +4,7 @@
 api:
   # Bind address for the management API.
   # Recommended: bind to 127.0.0.1 and front it with your own reverse proxy/auth if needed.
-  listen: "127.0.0.1:9601"
+  listen: "0.0.0.0:9601"
 
   # One or more bearer tokens accepted by the API.
   # Send as: Authorization: Bearer <token>

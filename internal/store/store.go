@@ -2,6 +2,19 @@ package store
 
 import "time"
 
+
+type PanelUser struct {
+	ID           int64
+	Username     string
+	PasswordHash string
+	Role         string
+	Enabled      bool
+	LastLoginAt  *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+
 type User struct {
 	ID       int64
 	Username string
@@ -38,5 +51,11 @@ type SiteStore interface {
 	GetSiteByDomain(domain string) (Site, error)
 	ListSites() ([]Site, error)
         DisableSiteByDomain(domain string) error
+
+	CreatePanelUser(username, passwordHash, role string, enabled bool) (PanelUser, error)
+	GetPanelUserByUsername(username string) (PanelUser, error)
+	UpdatePanelUserLastLogin(id int64) error
+
 	Close() error
 }
+

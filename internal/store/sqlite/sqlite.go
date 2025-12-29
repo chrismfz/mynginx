@@ -341,3 +341,84 @@ func (s *Store) ListPendingSites() ([]store.Site, error) {
         }
         return out, rows.Err()
 }
+
+
+
+
+func (s *Store) CreatePanelUser(username, passwordHash, role string, enabled bool) (store.PanelUser, error) {
+	if username == "" {
+		return store.PanelUser{}, fmt.Errorf("username is required")
+	}
+	if passwordHash == "" {
+		return store.PanelUser{}, fmt.Errorf("passwordHash is required")
+	}
+	if role == "" {
+		role = "admin"
+	}
+	en := 0
+	if enabled {
+		en = 1
+	}
+
+	_, err := s.db.Exec(`
+		INSERT INTO panel_users(username, password_hash, role, enabled)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(username) DO UPDATE SET
+			password_hash=excluded.password_hash,
+			role=excluded.role,
+			enabled=excluded.enabled,
+			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+	`, username, passwordHash, role, en)
+	if err != nil {
+		return store.PanelUser{}, err
+	}
+	return s.GetPanelUserByUsername(username)
+}
+
+func (s *Store) GetPanelUserByUsername(username string) (store.PanelUser, error) {
+	var u store.PanelUser
+	var enabled int
+	var lastLogin sql.NullString
+	var created, updated string
+
+	err := s.db.QueryRow(`
+		SELECT id, username, password_hash, role, enabled,
+		       last_login_at, created_at, updated_at
+		  FROM panel_users
+		 WHERE username=?
+	`, username).Scan(
+		&u.ID, &u.Username, &u.PasswordHash, &u.Role, &enabled,
+		&lastLogin, &created, &updated,
+	)
+	if err != nil {
+		return store.PanelUser{}, err
+	}
+	u.Enabled = enabled == 1
+
+	if lastLogin.Valid && lastLogin.String != "" {
+		if t, err := time.Parse(time.RFC3339Nano, lastLogin.String); err == nil {
+			u.LastLoginAt = &t
+		}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, created); err == nil {
+		u.CreatedAt = t
+	}
+	if t, err := time.Parse(time.RFC3339Nano, updated); err == nil {
+		u.UpdatedAt = t
+	}
+	return u, nil
+}
+
+func (s *Store) UpdatePanelUserLastLogin(id int64) error {
+	if id == 0 {
+		return fmt.Errorf("id is required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.Exec(`
+		UPDATE panel_users
+		   SET last_login_at=?,
+		       updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		 WHERE id=?
+	`, now, id)
+	return err
+}
