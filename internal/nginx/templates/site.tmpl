@@ -1,45 +1,7 @@
 # {{ .Domain }} (managed by NGM)
 
-{{- if eq .Mode "proxy" }}
-
-upstream up_{{ .UpstreamKey }} {
-    {{- if eq .Proxy.LB "least_conn" }}
-    least_conn;
-    {{- end }}
-    {{- range .Proxy.Targets }}
-    {{- if .Enabled }}
-    server {{ .Addr }}{{ if gt .Weight 0 }} weight={{ .Weight }}{{ end }}{{ if .Backup }} backup{{ end }};
-    {{- end }}
-    {{- end }}
-    keepalive 32;
-}
-{{- end }}
-
-# HTTP -> HTTPS + ACME challenge
-server {
-    listen 80;
-    server_name {{ .Domain }};
-
-    access_log {{ .AccessLog }};
-    error_log  {{ .ErrorLog }};
-
-    location ^~ /.well-known/acme-challenge/ {
-        root {{ .ACMEWebroot }};
-        default_type "text/plain";
-        allow all;
-    }
-
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-
-# HTTPS
-server {
-    listen 443 ssl;
-    {{- if .EnableHTTP3 }}
-    listen 443 quic reuseport;
-    {{- end }}
+{{- /* Reusable HTTPS server body (shared by TCP 443 and QUIC 443 servers) */ -}}
+{{- define "https_common" -}}
     server_name {{ .Domain }};
 
     ssl_certificate     {{ .TLSCert }};
@@ -47,12 +9,6 @@ server {
 
     ssl_protocols TLSv1.3;
     ssl_early_data on;
-
-    {{- if .EnableHTTP3 }}
-    add_header Alt-Svc 'h3=":443"; ma=86400' always;
-    http3 on;
-    {{- end }}
-    http2 on;
 
     access_log {{ .AccessLog }};
     error_log  {{ .ErrorLog }};
@@ -134,7 +90,6 @@ server {
         proxy_pass http://up_{{ .UpstreamKey }};
     }
 
-
     location / {
         proxy_http_version 1.1;
 
@@ -186,4 +141,65 @@ server {
     }
 
     {{- end }}
+{{- end -}}
+
+{{- if eq .Mode "proxy" }}
+
+upstream up_{{ .UpstreamKey }} {
+    {{- if eq .Proxy.LB "least_conn" }}
+    least_conn;
+    {{- end }}
+    {{- range .Proxy.Targets }}
+    {{- if .Enabled }}
+    server {{ .Addr }}{{ if gt .Weight 0 }} weight={{ .Weight }}{{ end }}{{ if .Backup }} backup{{ end }};
+    {{- end }}
+    {{- end }}
+    keepalive 32;
 }
+{{- end }}
+
+# HTTP -> HTTPS + ACME challenge
+server {
+    listen 80;
+    server_name {{ .Domain }};
+
+    access_log {{ .AccessLog }};
+    error_log  {{ .ErrorLog }};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ .ACMEWebroot }};
+        default_type "text/plain";
+        allow all;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS (TCP 443)
+server {
+    listen 443 ssl;
+
+    {{- if .EnableHTTP3 }}
+    # Advertise HTTP/3 to clients that connect over TCP first
+    add_header Alt-Svc 'h3=":443"; ma=86400' always;
+    {{- end }}
+
+    http2 on;
+
+{{ template "https_common" . }}
+}
+
+{{- if .EnableHTTP3 }}
+
+# HTTPS (UDP 443 - HTTP/3)
+server {
+    listen 443 quic reuseport;
+
+    http3 on;
+
+{{ template "https_common" . }}
+}
+
+{{- end }}
