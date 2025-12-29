@@ -39,6 +39,12 @@ declare -A REPOS=(
     ["aws-lc"]="https://github.com/aws/aws-lc.git"
     ["ngx_brotli"]="https://github.com/google/ngx_brotli.git"
     ["nginx"]="https://github.com/nginx/nginx.git"
+
+    # Lua support
+    ["ngx_devel_kit"]="https://github.com/vision5/ngx_devel_kit.git"
+    ["lua-nginx-module"]="https://github.com/openresty/lua-nginx-module.git"
+    ["LuaJIT"]="https://github.com/LuaJIT/LuaJIT.git"
+
 )
 
 for repo in "${!REPOS[@]}"; do
@@ -71,6 +77,21 @@ rm -rf out && mkdir out && cd out
 cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
 cmake --build . --config Release --target brotlienc brotlicommon brotlidec
 
+# --- 3.6 Prepare LUA ---
+echo "--- Building LuaJIT ---"
+cd $SRC_DIR/LuaJIT
+make -j"$(nproc)"
+make install PREFIX=/opt/luajit
+
+# Make sure the runtime linker can find it (for dynamic libluajit)
+echo "/opt/luajit/lib" > /etc/ld.so.conf.d/luajit.conf
+ldconfig
+
+export LUAJIT_LIB=/opt/luajit/lib
+export LUAJIT_INC=/opt/luajit/include/luajit-2.1
+
+
+
 # --- 4. Compiling NGINX ---
 echo "--- Compiling NGINX ---"
 cd $SRC_DIR/nginx
@@ -82,13 +103,16 @@ cd $SRC_DIR/nginx
     --with-http_ssl_module \
     --with-http_v2_module \
     --with-http_v3_module \
-    --with-cc-opt="-I$AWS_LC_PATH/include -I$SRC_DIR/ngx_brotli/deps/brotli/c/include" \
+    --with-cc-opt="-I$AWS_LC_PATH/include -I$SRC_DIR/ngx_brotli/deps/brotli/c/include -I$LUAJIT_INC" \
+    --with-ld-opt="-L$AWS_LC_PATH/lib -L$SRC_DIR/ngx_brotli/deps/brotli/out -L$LUAJIT_LIB -Wl,-rpath,/opt/luajit/lib -lluajit-5.1 -lm -ldl -lssl -lcrypto -lstdc++" \
     --with-ld-opt="-L$AWS_LC_PATH/lib -L$SRC_DIR/ngx_brotli/deps/brotli/out -lssl -lcrypto -lstdc++" \
     --with-pcre-jit \
     --with-threads \
     --with-file-aio \
     --with-http_gzip_static_module \
-    --add-module=$SRC_DIR/ngx_brotli
+    --add-module=$SRC_DIR/ngx_brotli \
+    --add-module=$SRC_DIR/ngx_devel_kit \
+    --add-module=$SRC_DIR/lua-nginx-module
 
 make -j$(nproc)
 make install
