@@ -1,7 +1,16 @@
 user www-data;
 worker_processes auto;
+# Increases the limit for the maximum number of open files for worker processes.
+worker_rlimit_nofile 65535; 
+
 thread_pool default_pool threads=32 max_queue=65536;
-events { worker_connections 1024; }
+
+events { 
+    # Allows more simultaneous connections
+    worker_connections 4096; 
+    multi_accept on;
+    use epoll;
+}
 
 
 http {
@@ -20,12 +29,19 @@ http {
     quic_retry on;
 
     # Gzip & Brotli
+    gzip_vary on;
     gzip on;
     gzip_static on;
     brotli on;
     brotli_comp_level 6;
     brotli_static on;
     brotli_types text/plain text/css application/javascript application/json image/svg+xml;
+
+
+open_file_cache          max=1000 inactive=5m;
+open_file_cache_valid    60s;
+open_file_cache_min_uses 1;
+open_file_cache_errors   on;
 
     # Cache keys
     proxy_cache_key   "$scheme$request_method$host$request_uri";

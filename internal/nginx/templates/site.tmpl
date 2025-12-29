@@ -63,6 +63,9 @@
     # Static assets cache (long TTL)
     location ~* \.(?:css|js|mjs|map|jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot|mp4|webm|pdf|zip)$ {
         proxy_http_version 1.1;
+        # Allow upstream keepalive: strip hop-by-hop Connection header from client.
+        # (Nginx will manage keepalive to the upstream pool.)
+        proxy_set_header Connection "";
 
         {{- if .Proxy.PassHost }}
         proxy_set_header Host $host;
@@ -105,6 +108,9 @@
 
     location / {
         proxy_http_version 1.1;
+        # Allow upstream keepalive: strip hop-by-hop Connection header from client.
+        # WebSocket case below will override this.
+        proxy_set_header Connection "";
 
         {{- if .Proxy.PassHost }}
         proxy_set_header Host $host;
