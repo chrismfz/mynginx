@@ -78,6 +78,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/ui/sites/new", s.requireAuth(s.handleSiteNew))
 	mux.HandleFunc("/ui/sites/edit", s.requireAuth(s.handleSiteEdit))
 	mux.HandleFunc("/ui/sites/disable", s.requireAuth(s.handleSiteDisable))
+	mux.HandleFunc("/ui/sites/enable", s.requireAuth(s.handleSiteEnable))
+	mux.HandleFunc("/ui/sites/delete", s.requireAuth(s.handleSiteDelete))
 
         // proxy targets
         mux.HandleFunc("/ui/sites/targets", s.requireAuth(s.handleProxyTargets))
@@ -478,6 +480,34 @@ func (s *Server) handleSiteDisable(w http.ResponseWriter, r *http.Request) {
 }
 
 
+func (s *Server) handleSiteEnable(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    _ = r.ParseForm()
+    domain := strings.TrimSpace(r.FormValue("domain"))
+    if _, err := s.core.SiteEnable(r.Context(), domain); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+    http.Redirect(w, r, "/ui/sites", http.StatusFound)
+}
+
+func (s *Server) handleSiteDelete(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    _ = r.ParseForm()
+    domain := strings.TrimSpace(r.FormValue("domain"))
+    if err := s.core.SiteDelete(r.Context(), domain); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+    http.Redirect(w, r, "/ui/sites", http.StatusFound)
+}
+
 // ---------------- proxy targets ----------------
 
 func (s *Server) handleProxyTargets(w http.ResponseWriter, r *http.Request) {
@@ -860,11 +890,26 @@ const sitesHTML = `{{define "sites"}}
             <a href="/ui/sites/targets?domain={{.Site.Domain}}" style="margin-left:8px;">Targets</a>
           {{end}}
           <a href="/ui/sites/edit?domain={{.Site.Domain}}" style="margin-left:8px;">Edit</a>
-          <form method="post" action="/ui/sites/disable" style="display:inline; margin-left:8px;"
-                onsubmit="return confirm('Disable {{.Site.Domain}} ?');">
-            <input type="hidden" name="domain" value="{{.Site.Domain}}">
-            <button>Disable</button>
-          </form>
+
+{{if .Site.Enabled}}
+            <form method="post" action="/ui/sites/disable" style="display:inline; margin-left:8px;"
+                  onsubmit="return confirm('Disable {{.Site.Domain}} ?');">
+              <input type="hidden" name="domain" value="{{.Site.Domain}}">
+              <button>Disable</button>
+            </form>
+          {{else}}
+            <form method="post" action="/ui/sites/enable" style="display:inline; margin-left:8px;"
+                  onsubmit="return confirm('Enable {{.Site.Domain}} ?');">
+              <input type="hidden" name="domain" value="{{.Site.Domain}}">
+              <button>Enable</button>
+            </form>
+            <form method="post" action="/ui/sites/delete" style="display:inline; margin-left:8px;"
+                  onsubmit="return confirm('DELETE {{.Site.Domain}} permanently? This cannot be undone.');">
+              <input type="hidden" name="domain" value="{{.Site.Domain}}">
+              <button>Delete</button>
+            </form>
+          {{end}}
+
         </td>
       </tr>
     {{end}}

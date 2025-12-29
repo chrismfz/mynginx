@@ -54,6 +54,11 @@ type SiteStore interface {
 	GetSiteByDomain(domain string) (Site, error)
 	ListSites() ([]Site, error)
         DisableSiteByDomain(domain string) error
+	// re-enable a previously disabled site
+	EnableSiteByDomain(domain string) error
+
+	// hard delete: permanently remove site row (and related rows)
+	DeleteSiteByDomain(domain string) error
 
 	// Proxy upstream targets (mode=proxy)
 	ListProxyTargetsBySiteID(siteID int64) ([]nginx.UpstreamTarget, error)

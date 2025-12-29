@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"strconv"
+	"os"
 
 	"mynginx/internal/store"
 	"mynginx/internal/users"
@@ -180,6 +181,47 @@ func (a *App) SiteDisable(ctx context.Context, domain string) error {
 	}
 	return a.st.DisableSiteByDomain(d)
 }
+
+
+func (a *App) SiteEnable(ctx context.Context, domain string) (store.Site, error) {
+    domain = strings.TrimSpace(domain)
+    if domain == "" {
+        return store.Site{}, fmt.Errorf("domain is required")
+    }
+    if err := a.st.EnableSiteByDomain(domain); err != nil {
+        return store.Site{}, err
+    }
+    return a.st.GetSiteByDomain(domain)
+}
+
+// SiteDelete hard-deletes DB rows and also removes the live nginx vhost (best-effort).
+// (We intentionally do NOT delete cert files here.)
+func (a *App) SiteDelete(ctx context.Context, domain string) error {
+    domain = strings.TrimSpace(domain)
+    if domain == "" {
+        return fmt.Errorf("domain is required")
+    }
+
+    // Best-effort remove live vhost (ignore missing file)
+    removed := false
+    if err := a.ng.RemoveLiveSite(domain); err == nil {
+        removed = true
+    } else if !os.IsNotExist(err) {
+        return fmt.Errorf("remove live vhost: %w", err)
+    }
+
+    if removed {
+        if err := a.ng.Reload(); err != nil {
+            return fmt.Errorf("nginx reload: %w", err)
+        }
+    }
+
+    // Hard delete from DB (handles proxy_targets/apply_runs too)
+    return a.st.DeleteSiteByDomain(domain)
+}
+
+
+
 
 func (a *App) SiteEdit(ctx context.Context, req SiteEditRequest) (store.Site, error) {
 	_ = ctx

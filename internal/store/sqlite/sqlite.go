@@ -261,10 +261,66 @@ func (s *Store) ListSites() ([]store.Site, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) DeleteSiteByDomain(domain string) error {
-	_, err := s.db.Exec(`DELETE FROM sites WHERE domain=?`, domain)
-	return err
+
+func (s *Store) EnableSiteByDomain(domain string) error {
+    domain = strings.TrimSpace(domain)
+    if domain == "" {
+        return fmt.Errorf("domain is required")
+    }
+    _, err := s.db.Exec(`
+        UPDATE sites
+           SET enabled    = 1,
+               deleted_at = NULL,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE domain = ?
+    `, domain)
+    return err
 }
+
+func (s *Store) DeleteSiteByDomain(domain string) error {
+    domain = strings.TrimSpace(domain)
+    if domain == "" {
+        return fmt.Errorf("domain is required")
+    }
+
+    tx, err := s.db.Begin()
+    if err != nil {
+        return err
+    }
+    defer func() {
+        if err != nil {
+            _ = tx.Rollback()
+        }
+    }()
+
+    var siteID int64
+    row := tx.QueryRow(`SELECT id FROM sites WHERE domain=?`, domain)
+    if scanErr := row.Scan(&siteID); scanErr != nil {
+        err = scanErr
+        return err
+    }
+
+    // Remove children first (FK-safe)
+    if _, execErr := tx.Exec(`DELETE FROM proxy_targets WHERE site_id=?`, siteID); execErr != nil {
+        err = execErr
+        return err
+    }
+    if _, execErr := tx.Exec(`DELETE FROM apply_runs WHERE site_id=?`, siteID); execErr != nil {
+        err = execErr
+        return err
+    }
+    if _, execErr := tx.Exec(`DELETE FROM sites WHERE id=?`, siteID); execErr != nil {
+        err = execErr
+        return err
+    }
+
+    if commitErr := tx.Commit(); commitErr != nil {
+        err = commitErr
+        return err
+    }
+    return nil
+}
+
 
 func (s *Store) DisableSiteByDomain(domain string) error {
         // soft delete: keep row for audit + pending delete apply
