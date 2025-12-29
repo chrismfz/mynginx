@@ -78,7 +78,12 @@ rm -rf out && mkdir out && cd out
 cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
 cmake --build . --config Release --target brotlienc brotlicommon brotlidec
 
+
 # --- 3.6 Prepare LUA ---
+
+echo "--- Patching lua-nginx-module: disable ssl_*_by_lua features (AWS-LC mismatch) ---"
+sed -i '/ngx_http_lua_ssl_/d' "$SRC_DIR/lua-nginx-module/config"
+
 echo "--- Building LuaJIT ---"
 cd $SRC_DIR/LuaJIT
 make -j"$(nproc)"
@@ -111,7 +116,7 @@ cd $SRC_DIR/nginx
     --with-http_ssl_module \
     --with-http_v2_module \
     --with-http_v3_module \
-    --with-cc-opt="-I$AWS_LC_PATH/include -I$SRC_DIR/ngx_brotli/deps/brotli/c/include -I$LUAJIT_INC" \
+    --with-cc-opt="-I$AWS_LC_PATH/include -I$SRC_DIR/ngx_brotli/deps/brotli/c/include -I$LUAJIT_INC -Wno-error=sign-compare -Wno-sign-compare" \
     --with-ld-opt="-L$AWS_LC_PATH/lib -L$SRC_DIR/ngx_brotli/deps/brotli/out -L$LUAJIT_LIB -Wl,-rpath,/opt/luajit/lib -lluajit-5.1 -lm -ldl -lssl -lcrypto -lstdc++" \
     --with-pcre-jit \
     --with-threads \
