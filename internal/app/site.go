@@ -228,6 +228,18 @@ func (a *App) SiteList(ctx context.Context) ([]SiteListItem, error) {
 	return out, nil
 }
 
+
+func (a *App) SiteGet(ctx context.Context, domain string) (store.Site, error) {
+	_ = ctx
+	d := strings.ToLower(strings.TrimSpace(domain))
+	if d == "" {
+		return store.Site{}, fmt.Errorf("domain is required")
+	}
+	return a.st.GetSiteByDomain(d)
+}
+
+
+
 func computeSiteState(s store.Site) (state string, last string) {
 	last = "-"
 	if s.LastAppliedAt != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"html/template"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,10 @@ import (
 )
 
 const cookieName = "ngm_session"
+
+type ctxKey int
+
+const ctxSession ctxKey = 1
 
 type Server struct {
 	cfg   *config.Config
@@ -32,10 +37,17 @@ func New(cfg *config.Config, paths config.Paths, st store.SiteStore) (*Server, e
 		return nil, err
 	}
 
-	// Minimal templates (keep it dead simple for now)
 	tpl := template.New("root")
+	template.Must(tpl.New("layout").Parse(layoutHTML))
+	template.Must(tpl.New("menu").Parse(menuHTML))
 	template.Must(tpl.New("login").Parse(loginHTML))
 	template.Must(tpl.New("sites").Parse(sitesHTML))
+	template.Must(tpl.New("site_form").Parse(siteFormHTML))
+	template.Must(tpl.New("apply_form").Parse(applyFormHTML))
+	template.Must(tpl.New("apply_result").Parse(applyResultHTML))
+	template.Must(tpl.New("certs").Parse(certsHTML))
+	template.Must(tpl.New("cert_info").Parse(certInfoHTML))
+	template.Must(tpl.New("cert_check").Parse(certCheckHTML))
 
 	return &Server{
 		cfg:      cfg,
@@ -50,14 +62,29 @@ func New(cfg *config.Config, paths config.Paths, st store.SiteStore) (*Server, e
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// UI routes
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/sites", http.StatusFound)
 	})
+
+	// auth
 	mux.HandleFunc("/ui/login", s.handleLogin)
 	mux.HandleFunc("/ui/logout", s.requireAuth(s.handleLogout))
+
+	// sites
 	mux.HandleFunc("/ui/sites", s.requireAuth(s.handleSites))
+	mux.HandleFunc("/ui/sites/new", s.requireAuth(s.handleSiteNew))
+	mux.HandleFunc("/ui/sites/edit", s.requireAuth(s.handleSiteEdit))
+	mux.HandleFunc("/ui/sites/disable", s.requireAuth(s.handleSiteDisable))
+
+	// apply
 	mux.HandleFunc("/ui/apply", s.requireAuth(s.handleApply))
+
+	// certs
+	mux.HandleFunc("/ui/certs", s.requireAuth(s.handleCerts))
+	mux.HandleFunc("/ui/cert/info", s.requireAuth(s.handleCertInfo))
+	mux.HandleFunc("/ui/cert/issue", s.requireAuth(s.handleCertIssue))
+	mux.HandleFunc("/ui/cert/renew", s.requireAuth(s.handleCertRenew))
+	mux.HandleFunc("/ui/cert/check", s.requireAuth(s.handleCertCheck))
 
 	return mux
 }
@@ -68,24 +95,32 @@ func (s *Server) Serve(ctx context.Context, listen string) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())
 	}()
-
 	return srv.ListenAndServe()
 }
 
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		_, ok := s.currentSession(r)
+		sess, ok := s.currentSession(r)
 		if !ok {
 			http.Redirect(w, r, "/ui/login", http.StatusFound)
 			return
 		}
-		next(w, r)
+		ctx := context.WithValue(r.Context(), ctxSession, sess)
+		next(w, r.WithContext(ctx))
 	}
+}
+
+func (s *Server) sessionFromCtx(r *http.Request) (Session, bool) {
+	v := r.Context().Value(ctxSession)
+	if v == nil {
+		return Session{}, false
+	}
+	sess, ok := v.(Session)
+	return sess, ok
 }
 
 func (s *Server) currentSession(r *http.Request) (Session, bool) {
@@ -103,7 +138,7 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil, // when behind nginx TLS later, this becomes true
+		Secure:   r.TLS != nil,
 	})
 }
 
@@ -118,11 +153,29 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter) {
 	})
 }
 
+func (s *Server) render(w http.ResponseWriter, r *http.Request, title, page string, data map[string]any) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["Title"] = title
+	data["Page"] = page
+	if sess, ok := s.sessionFromCtx(r); ok {
+		data["Authed"] = true
+		data["Session"] = sess
+	} else {
+		data["Authed"] = false
+	}
+	_ = s.tpl.ExecuteTemplate(w, "layout", data)
+}
+
+// ---------------- auth ----------------
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		_ = s.tpl.ExecuteTemplate(w, "login", map[string]any{"Error": ""})
 		return
+
 	case http.MethodPost:
 		_ = r.ParseForm()
 		username := strings.TrimSpace(r.FormValue("username"))
@@ -143,10 +196,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			_ = s.tpl.ExecuteTemplate(w, "login", map[string]any{"Error": "Login failed"})
 			return
 		}
+
 		_ = s.st.UpdatePanelUserLastLogin(u.ID)
 		s.setSessionCookie(w, r, sess.Token)
 		http.Redirect(w, r, "/ui/sites", http.StatusFound)
 		return
+
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -161,32 +216,344 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/ui/login", http.StatusFound)
 }
 
+// ---------------- sites ----------------
+
 func (s *Server) handleSites(w http.ResponseWriter, r *http.Request) {
 	items, err := s.core.SiteList(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = s.tpl.ExecuteTemplate(w, "sites", map[string]any{
-		"Items": items,
-	})
+	s.render(w, r, "Sites", "sites", map[string]any{"Items": items})
 }
 
-func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSiteNew(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.render(w, r, "Add Site", "site_form", map[string]any{
+			"Mode": "new",
+			"Form": map[string]any{
+				"mode":      "php",
+				"http3":     "true",
+				"provision": "true",
+				"applynow":  "true",
+			},
+		})
+		return
+
+	case http.MethodPost:
+		_ = r.ParseForm()
+
+		req := app.SiteAddRequest{
+			User:      strings.TrimSpace(r.FormValue("user")),
+			Domain:    strings.TrimSpace(r.FormValue("domain")),
+			Mode:      strings.TrimSpace(r.FormValue("mode")),
+			PHP:       strings.TrimSpace(r.FormValue("php")),
+			Webroot:   strings.TrimSpace(r.FormValue("webroot")),
+			HTTP3:     parseBool(r.FormValue("http3"), true),
+			Provision: parseBool(r.FormValue("provision"), true),
+			SkipCert:  parseBool(r.FormValue("skipcert"), false),
+			ApplyNow:  parseBool(r.FormValue("applynow"), true),
+		}
+
+		res, err := s.core.SiteAdd(r.Context(), req)
+		if err != nil {
+			s.render(w, r, "Add Site", "site_form", map[string]any{
+				"Mode":  "new",
+				"Error": err.Error(),
+				"Form": map[string]any{
+					"user":      req.User,
+					"domain":    req.Domain,
+					"mode":      req.Mode,
+					"php":       req.PHP,
+					"webroot":   req.Webroot,
+					"http3":     boolStr(req.HTTP3),
+					"provision": boolStr(req.Provision),
+					"skipcert":  boolStr(req.SkipCert),
+					"applynow":  boolStr(req.ApplyNow),
+				},
+			})
+			return
+		}
+
+		s.render(w, r, "Site Saved", "site_form", map[string]any{
+			"Mode":     "result",
+			"Site":     res.Site,
+			"Warnings": res.Warnings,
+		})
+		return
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleSiteEdit(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		d := strings.TrimSpace(r.URL.Query().Get("domain"))
+		cur, err := s.core.SiteGet(r.Context(), d)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.render(w, r, "Edit Site", "site_form", map[string]any{
+			"Mode": "edit",
+			"Form": map[string]any{
+				"domain":   cur.Domain,
+				"user":     "",
+				"mode":     cur.Mode,
+				"php":      cur.PHPVersion,
+				"webroot":  cur.Webroot,
+				"http3":    boolStr(cur.EnableHTTP3),
+				"enabled":  boolStr(cur.Enabled),
+				"applynow": "false",
+			},
+		})
+		return
+
+	case http.MethodPost:
+		_ = r.ParseForm()
+
+		domain := strings.TrimSpace(r.FormValue("domain"))
+		http3 := parseBool(r.FormValue("http3"), true)
+		enabled := parseBool(r.FormValue("enabled"), true)
+		applyNow := parseBool(r.FormValue("applynow"), false)
+
+		req := app.SiteEditRequest{
+			Domain:   domain,
+			User:     strings.TrimSpace(r.FormValue("user")),
+			Mode:     strings.TrimSpace(r.FormValue("mode")),
+			PHP:      strings.TrimSpace(r.FormValue("php")),
+			Webroot:  strings.TrimSpace(r.FormValue("webroot")),
+			HTTP3:    &http3,
+			Enabled:  &enabled,
+			ApplyNow: applyNow,
+		}
+
+		updated, err := s.core.SiteEdit(r.Context(), req)
+		if err != nil {
+			s.render(w, r, "Edit Site", "site_form", map[string]any{
+				"Mode":  "edit",
+				"Error": err.Error(),
+				"Form": map[string]any{
+					"domain":   req.Domain,
+					"user":     req.User,
+					"mode":     req.Mode,
+					"php":      req.PHP,
+					"webroot":  req.Webroot,
+					"http3":    boolStr(http3),
+					"enabled":  boolStr(enabled),
+					"applynow": boolStr(applyNow),
+				},
+			})
+			return
+		}
+
+		s.render(w, r, "Site Updated", "site_form", map[string]any{
+			"Mode": "result",
+			"Site": updated,
+		})
+		return
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleSiteDisable(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	_ = r.ParseForm()
 	domain := strings.TrimSpace(r.FormValue("domain"))
-
-	_, err := s.core.Apply(r.Context(), app.ApplyRequest{Domain: domain})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := s.core.SiteDisable(r.Context(), domain); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	http.Redirect(w, r, "/ui/sites", http.StatusFound)
 }
+
+// ---------------- apply ----------------
+
+func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.render(w, r, "Apply", "apply_form", map[string]any{})
+		return
+
+	case http.MethodPost:
+		_ = r.ParseForm()
+		domain := strings.TrimSpace(r.FormValue("domain"))
+		all := parseBool(r.FormValue("all"), false)
+		dry := parseBool(r.FormValue("dry"), false)
+		limit, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("limit")))
+
+		res, err := s.core.Apply(r.Context(), app.ApplyRequest{
+			Domain: domain,
+			All:    all,
+			DryRun: dry,
+			Limit:  limit,
+		})
+		if err != nil {
+			s.render(w, r, "Apply Result", "apply_result", map[string]any{
+				"Result": res,
+				"Error":  err.Error(),
+			})
+			return
+		}
+
+		s.render(w, r, "Apply Result", "apply_result", map[string]any{
+			"Result": res,
+		})
+		return
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------- certs ----------------
+
+func (s *Server) handleCerts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	items, err := s.core.CertList()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.render(w, r, "Certificates", "certs", map[string]any{"Items": items})
+}
+
+func (s *Server) handleCertInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d := strings.TrimSpace(r.URL.Query().Get("domain"))
+	info, err := s.core.CertInfo(d)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.render(w, r, "Certificate Info", "cert_info", map[string]any{"Info": info})
+}
+
+func (s *Server) handleCertIssue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = r.ParseForm()
+	d := strings.TrimSpace(r.FormValue("domain"))
+	if d == "" {
+		http.Error(w, "domain is required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	if err := s.core.CertIssue(ctx, d, true); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/ui/certs", http.StatusFound)
+}
+
+func (s *Server) handleCertRenew(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = r.ParseForm()
+	d := strings.TrimSpace(r.FormValue("domain"))
+	all := parseBool(r.FormValue("all"), false)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	if err := s.core.CertRenew(ctx, d, all, true); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/ui/certs", http.StatusFound)
+}
+
+func (s *Server) handleCertCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	daysStr := strings.TrimSpace(r.URL.Query().Get("days"))
+	days := 30
+	if daysStr != "" {
+		if v, err := strconv.Atoi(daysStr); err == nil && v > 0 {
+			days = v
+		}
+	}
+
+	items, err := s.core.CertCheck(days)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.render(w, r, "Cert Check", "cert_check", map[string]any{
+		"Days":  days,
+		"Items": items,
+	})
+}
+
+// ---------------- helpers ----------------
+
+func parseBool(v string, def bool) bool {
+	v = strings.TrimSpace(strings.ToLower(v))
+	if v == "" {
+		return def
+	}
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// ---------------- templates ----------------
+
+const layoutHTML = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{{.Title}}</title>
+</head>
+<body style="font-family:system-ui; margin:24px;">
+  {{if .Authed}}{{template "menu" .}}{{end}}
+  <div style="max-width:1100px;">
+    {{template .Page .}}
+  </div>
+</body>
+</html>`
+
+const menuHTML = `{{define "menu"}}
+  <div style="display:flex; gap:12px; align-items:center; margin-bottom:18px;">
+    <div style="font-weight:700;">NGM</div>
+    <a href="/ui/sites">Sites</a>
+    <a href="/ui/sites/new">Add Site</a>
+    <a href="/ui/apply">Apply</a>
+    <a href="/ui/certs">Certificates</a>
+
+    <div style="margin-left:auto; display:flex; gap:10px; align-items:center;">
+      <div style="opacity:.75;">{{.Session.Username}}</div>
+      <a href="/ui/logout">Logout</a>
+    </div>
+  </div>
+{{end}}`
 
 const loginHTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>NGM Login</title></head>
@@ -206,17 +573,9 @@ const loginHTML = `<!doctype html>
   </form>
 </body></html>`
 
-const sitesHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><title>NGM Sites</title></head>
-<body style="font-family:system-ui; margin:30px;">
-  <div style="display:flex; gap:12px; align-items:center;">
-    <h2 style="margin:0;">Sites</h2>
-    <form method="post" action="/ui/logout" style="margin-left:auto;">
-      <button style="padding:8px 10px;">Logout</button>
-    </form>
-  </div>
-
-  <p style="opacity:.8;">Apply renders/publishes nginx vhosts and reloads when needed.</p>
+const sitesHTML = `{{define "sites"}}
+  <h2 style="margin:0 0 10px 0;">Sites</h2>
+  <p style="opacity:.8; margin-top:0;">Manage sites and apply nginx changes.</p>
 
   <table cellpadding="8" cellspacing="0" border="1" style="border-collapse:collapse; width:100%;">
     <thead>
@@ -239,14 +598,292 @@ const sitesHTML = `<!doctype html>
         <td align="center">{{.State}}</td>
         <td align="center">{{.Last}}</td>
         <td align="center">{{.Site.PHPVersion}}</td>
-        <td align="center">
+        <td align="center" style="white-space:nowrap;">
           <form method="post" action="/ui/apply" style="display:inline;">
             <input type="hidden" name="domain" value="{{.Site.Domain}}">
             <button>Apply</button>
+          </form>
+          <a href="/ui/sites/edit?domain={{.Site.Domain}}" style="margin-left:8px;">Edit</a>
+          <form method="post" action="/ui/sites/disable" style="display:inline; margin-left:8px;"
+                onsubmit="return confirm('Disable {{.Site.Domain}} ?');">
+            <input type="hidden" name="domain" value="{{.Site.Domain}}">
+            <button>Disable</button>
           </form>
         </td>
       </tr>
     {{end}}
     </tbody>
   </table>
-</body></html>`
+{{end}}`
+
+const siteFormHTML = `{{define "site_form"}}
+  {{if eq .Mode "new"}}<h2>Add Site</h2>{{end}}
+  {{if eq .Mode "edit"}}<h2>Edit Site</h2>{{end}}
+  {{if eq .Mode "result"}}<h2>Result</h2>{{end}}
+
+  {{if .Error}}<p style="color:#b00;">{{.Error}}</p>{{end}}
+  {{if .Warnings}}
+    <div style="border:1px solid #cc0; padding:10px; margin:10px 0;">
+      <div style="font-weight:700;">Warnings</div>
+      <ul>
+        {{range .Warnings}}<li>{{.}}</li>{{end}}
+      </ul>
+    </div>
+  {{end}}
+
+  {{if eq .Mode "result"}}
+    <pre style="background:#f6f6f6; padding:12px; overflow:auto;">{{printf "%+v" .Site}}</pre>
+    <p><a href="/ui/sites">Back to Sites</a></p>
+  {{else}}
+    <form method="post" action="{{if eq .Mode "new"}}/ui/sites/new{{else}}/ui/sites/edit{{end}}">
+      <div style="display:grid; grid-template-columns: 180px 1fr; gap:10px; max-width:820px;">
+        <label>Domain</label>
+        <input name="domain" value="{{index .Form "domain"}}" style="padding:8px;" {{if eq .Mode "edit"}}readonly{{end}}>
+
+        <label>User (owner)</label>
+        <input name="user" value="{{index .Form "user"}}" style="padding:8px;" placeholder="e.g. chris">
+
+        <label>Mode</label>
+        <select name="mode" style="padding:8px;">
+          <option value="php" {{if eq (index .Form "mode") "php"}}selected{{end}}>php</option>
+          <option value="proxy" {{if eq (index .Form "mode") "proxy"}}selected{{end}}>proxy</option>
+          <option value="static" {{if eq (index .Form "mode") "static"}}selected{{end}}>static</option>
+        </select>
+
+        <label>PHP Version</label>
+        <input name="php" value="{{index .Form "php"}}" style="padding:8px;" placeholder="e.g. 8.4">
+
+        <label>Webroot</label>
+        <input name="webroot" value="{{index .Form "webroot"}}" style="padding:8px;" placeholder="optional">
+
+        <label>HTTP/3</label>
+        <select name="http3" style="padding:8px;">
+          <option value="true" {{if eq (index .Form "http3") "true"}}selected{{end}}>true</option>
+          <option value="false" {{if eq (index .Form "http3") "false"}}selected{{end}}>false</option>
+        </select>
+
+        {{if eq .Mode "new"}}
+          <label>Provision</label>
+          <select name="provision" style="padding:8px;">
+            <option value="true" {{if eq (index .Form "provision") "true"}}selected{{end}}>true</option>
+            <option value="false" {{if eq (index .Form "provision") "false"}}selected{{end}}>false</option>
+          </select>
+
+          <label>Apply Now</label>
+          <select name="applynow" style="padding:8px;">
+            <option value="true" {{if eq (index .Form "applynow") "true"}}selected{{end}}>true</option>
+            <option value="false" {{if eq (index .Form "applynow") "false"}}selected{{end}}>false</option>
+          </select>
+
+          <label>Skip Cert</label>
+          <select name="skipcert" style="padding:8px;">
+            <option value="false" {{if eq (index .Form "skipcert") "false"}}selected{{end}}>false</option>
+            <option value="true" {{if eq (index .Form "skipcert") "true"}}selected{{end}}>true</option>
+          </select>
+        {{else}}
+          <label>Enabled</label>
+          <select name="enabled" style="padding:8px;">
+            <option value="true" {{if eq (index .Form "enabled") "true"}}selected{{end}}>true</option>
+            <option value="false" {{if eq (index .Form "enabled") "false"}}selected{{end}}>false</option>
+          </select>
+
+          <label>Apply Now</label>
+          <select name="applynow" style="padding:8px;">
+            <option value="false" {{if eq (index .Form "applynow") "false"}}selected{{end}}>false</option>
+            <option value="true" {{if eq (index .Form "applynow") "true"}}selected{{end}}>true</option>
+          </select>
+        {{end}}
+      </div>
+
+      <div style="margin-top:14px;">
+        <button style="padding:10px 14px;">Save</button>
+        <a href="/ui/sites" style="margin-left:10px;">Cancel</a>
+      </div>
+    </form>
+  {{end}}
+{{end}}`
+
+const applyFormHTML = `{{define "apply_form"}}
+  <h2>Apply</h2>
+  <p style="opacity:.8;">Renders/publishes nginx vhosts and reloads when needed.</p>
+
+  <form method="post" action="/ui/apply" style="max-width:720px;">
+    <div style="display:grid; grid-template-columns: 180px 1fr; gap:10px;">
+      <label>Domain (optional)</label>
+      <input name="domain" style="padding:8px;" placeholder="example.com">
+
+      <label>All (apply even if not pending)</label>
+      <select name="all" style="padding:8px;">
+        <option value="false" selected>false</option>
+        <option value="true">true</option>
+      </select>
+
+      <label>Dry run</label>
+      <select name="dry" style="padding:8px;">
+        <option value="false" selected>false</option>
+        <option value="true">true</option>
+      </select>
+
+      <label>Limit (0 = unlimited)</label>
+      <input name="limit" style="padding:8px;" value="0">
+    </div>
+
+    <div style="margin-top:14px;">
+      <button style="padding:10px 14px;">Run Apply</button>
+    </div>
+  </form>
+{{end}}`
+
+const applyResultHTML = `{{define "apply_result"}}
+  <h2>Apply Result</h2>
+  {{if .Error}}<p style="color:#b00;">{{.Error}}</p>{{end}}
+
+  {{with .Result}}
+    <p style="opacity:.8;">
+      Reloaded: <b>{{.Reloaded}}</b>
+      &nbsp; Changed: <b>{{len .Changed}}</b>
+    </p>
+
+    <table cellpadding="8" cellspacing="0" border="1" style="border-collapse:collapse; width:100%;">
+      <thead>
+        <tr>
+          <th align="left">Domain</th>
+          <th>Action</th>
+          <th>Status</th>
+          <th>Changed</th>
+          <th align="left">Error</th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range .Domains}}
+        <tr>
+          <td>{{.Domain}}</td>
+          <td align="center">{{.Action}}</td>
+          <td align="center">{{.Status}}</td>
+          <td align="center">{{if .Changed}}yes{{else}}no{{end}}</td>
+          <td>{{.Error}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  {{end}}
+
+  <p style="margin-top:14px;">
+    <a href="/ui/sites">Back to Sites</a>
+    &nbsp;|&nbsp;
+    <a href="/ui/apply">Apply again</a>
+  </p>
+{{end}}`
+
+const certsHTML = `{{define "certs"}}
+  <h2>Certificates</h2>
+
+  <div style="margin:10px 0; padding:10px; border:1px solid #ddd;">
+    <form method="get" action="/ui/cert/check" style="display:flex; gap:10px; align-items:center;">
+      <div>Check expiring within</div>
+      <input name="days" value="30" style="padding:6px; width:80px;">
+      <div>days</div>
+      <button style="padding:8px 10px;">Check</button>
+    </form>
+  </div>
+
+  <table cellpadding="8" cellspacing="0" border="1" style="border-collapse:collapse; width:100%;">
+    <thead>
+      <tr>
+        <th align="left">Domain</th>
+        <th>Days Left</th>
+        <th>Not Before</th>
+        <th>Not After</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {{range .Items}}
+      <tr>
+        <td>{{.Domain}}</td>
+        <td align="center">{{.DaysLeft}}</td>
+        <td align="center">{{.NotBefore.Format "2006-01-02 15:04"}}</td>
+        <td align="center">{{.NotAfter.Format "2006-01-02 15:04"}}</td>
+        <td align="center" style="white-space:nowrap;">
+          <a href="/ui/cert/info?domain={{.Domain}}">Info</a>
+          <form method="post" action="/ui/cert/issue" style="display:inline; margin-left:8px;"
+                onsubmit="return confirm('Issue/renew certificate for {{.Domain}} ?');">
+            <input type="hidden" name="domain" value="{{.Domain}}">
+            <button>Issue</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+
+  <div style="margin-top:14px; padding:10px; border:1px solid #ddd;">
+    <form method="post" action="/ui/cert/renew" onsubmit="return confirm('Renew ALL certificates?');">
+      <input type="hidden" name="all" value="true">
+      <button style="padding:10px 14px;">Renew All</button>
+    </form>
+  </div>
+{{end}}`
+
+const certInfoHTML = `{{define "cert_info"}}
+  <h2>Certificate Info</h2>
+
+  {{if or (not .Info) (not .Info.Exists)}}
+    <p>Certificate does not exist.</p>
+  {{else}}
+    <table cellpadding="8" cellspacing="0" border="1" style="border-collapse:collapse; width:100%; max-width:900px;">
+      <tr><td><b>Domain</b></td><td>{{.Info.Domain}}</td></tr>
+      <tr><td><b>Cert Path</b></td><td>{{.Info.CertPath}}</td></tr>
+      <tr><td><b>Key Path</b></td><td>{{.Info.KeyPath}}</td></tr>
+      <tr><td><b>Not Before</b></td><td>{{.Info.NotBefore.Format "2006-01-02 15:04:05"}}</td></tr>
+      <tr><td><b>Not After</b></td><td>{{.Info.NotAfter.Format "2006-01-02 15:04:05"}}</td></tr>
+      <tr><td><b>Days Left</b></td><td>{{.Info.DaysLeft}}</td></tr>
+    </table>
+
+    <div style="margin-top:12px;">
+      <form method="post" action="/ui/cert/issue" style="display:inline;"
+            onsubmit="return confirm('Issue/renew certificate for {{.Info.Domain}} ?');">
+        <input type="hidden" name="domain" value="{{.Info.Domain}}">
+        <button style="padding:10px 14px;">Issue / Renew</button>
+      </form>
+
+      <form method="post" action="/ui/cert/renew" style="display:inline; margin-left:10px;">
+        <input type="hidden" name="domain" value="{{.Info.Domain}}">
+        <button style="padding:10px 14px;">Renew (single)</button>
+      </form>
+    </div>
+  {{end}}
+
+  <p style="margin-top:14px;"><a href="/ui/certs">Back to Certificates</a></p>
+{{end}}`
+
+const certCheckHTML = `{{define "cert_check"}}
+  <h2>Certificates expiring within {{.Days}} days</h2>
+
+  {{if not .Items}}
+    <p>No certificates expiring soon.</p>
+  {{else}}
+    <table cellpadding="8" cellspacing="0" border="1" style="border-collapse:collapse; width:100%;">
+      <thead>
+        <tr>
+          <th align="left">Domain</th>
+          <th>Days Left</th>
+          <th>Expires</th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range .Items}}
+        {{if le .DaysLeft $.Days}}
+          <tr>
+            <td>{{.Domain}}</td>
+            <td align="center">{{.DaysLeft}}</td>
+            <td align="center">{{.NotAfter.Format "2006-01-02 15:04"}}</td>
+          </tr>
+        {{end}}
+      {{end}}
+      </tbody>
+    </table>
+  {{end}}
+
+  <p style="margin-top:14px;"><a href="/ui/certs">Back to Certificates</a></p>
+{{end}}`
