@@ -8,6 +8,7 @@ import (
         "text/template"
 	"bytes"
         "mynginx/internal/util"
+	"strings"
 
 )
 
@@ -59,23 +60,42 @@ func (m *Manager) EnsureLayout() error {
 }
 
 
+type CmdOutputError struct {
+    Cmd    string
+    Stdout string
+    Stderr string
+    Err    error
+}
+
+func (e *CmdOutputError) Error() string {
+    // keep it readable in UI and logs
+    out := strings.TrimSpace(e.Stdout)
+    er  := strings.TrimSpace(e.Stderr)
+    msg := e.Cmd + ": " + e.Err.Error()
+    if er != "" {
+        msg += "\n--- stderr ---\n" + er
+    }
+    if out != "" {
+        msg += "\n--- stdout ---\n" + out
+    }
+    return msg
+}
+
+
 //apply test config
 func (m *Manager) TestConfig() error {
         // Use -c explicitly to avoid relying on cwd/defaults.
         res, err := util.Run(10*time.Second, m.Bin, "-t", "-c", m.MainConf)
 
-        // nginx prints most diagnostics on stderr even on success
-        if res.Stdout != "" {
-                fmt.Print(res.Stdout)
+    if err != nil {
+        return &CmdOutputError{
+            Cmd:    m.Bin + " -t -c " + m.MainConf,
+            Stdout: res.Stdout,
+            Stderr: res.Stderr,
+            Err:    err,
         }
-        if res.Stderr != "" {
-                fmt.Print(res.Stderr)
-        }
-
-        if err != nil {
-                return err
-        }
-        return nil
+    }
+    return nil
 }
 
 

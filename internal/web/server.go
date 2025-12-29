@@ -1145,7 +1145,7 @@ const applyResultHTML = `{{define "apply_result"}}
           <td align="center">{{.Action}}</td>
           <td align="center">{{.Status}}</td>
           <td align="center">{{if .Changed}}yes{{else}}no{{end}}</td>
-          <td>{{.Error}}</td>
+	  <td><pre style="white-space:pre-wrap; margin:0;">{{.Error}}</pre></td>
         </tr>
       {{end}}
       </tbody>

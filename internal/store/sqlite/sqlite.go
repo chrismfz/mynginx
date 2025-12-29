@@ -22,10 +22,9 @@ type Store struct {
 // ListProxyTargetsBySiteID returns enabled proxy upstream targets for a site.
 func (s *Store) ListProxyTargetsBySiteID(siteID int64) ([]nginx.UpstreamTarget, error) {
     rows, err := s.db.Query(`
-        SELECT target, weight
+	  SELECT target, weight, is_backup, enabled
           FROM proxy_targets
          WHERE site_id = ?
-           AND enabled = 1
          ORDER BY is_backup ASC, id ASC
     `, siteID)
     if err != nil {
@@ -36,9 +35,12 @@ func (s *Store) ListProxyTargetsBySiteID(siteID int64) ([]nginx.UpstreamTarget, 
     var out []nginx.UpstreamTarget
     for rows.Next() {
         var t nginx.UpstreamTarget
-        if err := rows.Scan(&t.Addr, &t.Weight); err != nil {
+        var isBackup, enabled int
+        if err := rows.Scan(&t.Addr, &t.Weight, &isBackup, &enabled); err != nil {
             return nil, err
         }
+        t.Backup = isBackup == 1
+        t.Enabled = enabled == 1
         out = append(out, t)
     }
     return out, rows.Err()
