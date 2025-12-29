@@ -1,7 +1,9 @@
 package store
 
-import "time"
-
+import (
+	"time"
+	"mynginx/internal/nginx"
+)
 
 type PanelUser struct {
 	ID           int64
@@ -52,6 +54,11 @@ type SiteStore interface {
 	GetSiteByDomain(domain string) (Site, error)
 	ListSites() ([]Site, error)
         DisableSiteByDomain(domain string) error
+
+	// Proxy upstream targets (mode=proxy)
+	ListProxyTargetsBySiteID(siteID int64) ([]nginx.UpstreamTarget, error)
+	UpsertProxyTarget(siteID int64, target string, weight int, isBackup bool, enabled bool) error
+	DisableProxyTarget(siteID int64, target string) error
 
 	CreatePanelUser(username, passwordHash, role string, enabled bool) (PanelUser, error)
 	GetPanelUserByUsername(username string) (PanelUser, error)

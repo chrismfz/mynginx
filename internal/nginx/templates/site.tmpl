@@ -7,7 +7,9 @@ upstream up_{{ .UpstreamKey }} {
     least_conn;
     {{- end }}
     {{- range .Proxy.Targets }}
-    server {{ .Addr }}{{ if gt .Weight 0 }} weight={{ .Weight }}{{ end }};
+    {{- if .Enabled }}
+    server {{ .Addr }}{{ if gt .Weight 0 }} weight={{ .Weight }}{{ end }}{{ if .Backup }} backup{{ end }};
+    {{- end }}
     {{- end }}
     keepalive 32;
 }

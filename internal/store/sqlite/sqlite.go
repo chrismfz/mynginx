@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
+	"strings"
 	_ "modernc.org/sqlite"
 
 	"mynginx/internal/store"
@@ -441,4 +441,51 @@ func (s *Store) GetUserByID(id int64) (store.User, error) {
                 out.CreatedAt = t
         }
         return out, nil
+}
+
+
+func (s *Store) UpsertProxyTarget(siteID int64, target string, weight int, isBackup bool, enabled bool) error {
+	if siteID == 0 {
+		return fmt.Errorf("siteID is required")
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("target is required")
+	}
+	if weight <= 0 {
+		weight = 100
+	}
+	bk := 0
+	if isBackup {
+		bk = 1
+	}
+	en := 0
+	if enabled {
+		en = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO proxy_targets(site_id, target, weight, is_backup, enabled)
+		VALUES(?,?,?,?,?)
+		ON CONFLICT(site_id, target) DO UPDATE SET
+			weight=excluded.weight,
+			is_backup=excluded.is_backup,
+			enabled=excluded.enabled
+	`, siteID, target, weight, bk, en)
+	return err
+}
+
+func (s *Store) DisableProxyTarget(siteID int64, target string) error {
+	if siteID == 0 {
+		return fmt.Errorf("siteID is required")
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("target is required")
+	}
+	_, err := s.db.Exec(`
+		UPDATE proxy_targets
+		   SET enabled=0
+		 WHERE site_id=? AND target=?
+	`, siteID, target)
+	return err
 }

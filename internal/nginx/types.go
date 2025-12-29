@@ -19,6 +19,8 @@ type FastCGICfg struct {
 type UpstreamTarget struct {
 	Addr   string // "10.0.0.10:8080" or "unix:/run/app.sock"
 	Weight int
+	Backup  bool
+	Enabled bool
 }
 
 type ProxyCfg struct {

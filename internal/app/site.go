@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"strconv"
 
 	"mynginx/internal/store"
 	"mynginx/internal/users"
@@ -21,6 +22,10 @@ type SiteAddRequest struct {
 	Provision bool
 	SkipCert  bool
 	ApplyNow  bool
+
+	// For proxy mode: one per line, e.g. "127.0.0.1:8080" or "10.0.0.2:8080 50"
+	ProxyTargets []string
+
 }
 
 type SiteAddResult struct {
@@ -112,6 +117,41 @@ func (a *App) SiteAdd(ctx context.Context, req SiteAddRequest) (SiteAddResult, e
 		return out, err
 	}
 	out.Site = s
+
+	// If proxy targets were provided on create, persist them before apply.
+	if mode == "proxy" && len(req.ProxyTargets) > 0 {
+		for _, line := range req.ProxyTargets {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			weight := 100
+			addr := line
+			// allow "addr weight"
+			if parts := strings.Fields(line); len(parts) >= 1 {
+				addr = parts[0]
+				if len(parts) >= 2 {
+					if w, err := strconv.Atoi(parts[1]); err == nil && w > 0 {
+						weight = w
+					}
+				}
+			}
+			if err := a.st.UpsertProxyTarget(s.ID, addr, weight, false, true); err != nil {
+				out.Warnings = append(out.Warnings, "proxy target add failed: "+err.Error())
+			}
+		}
+	}
+
+	// Don't apply proxy site if still no targets.
+	if mode == "proxy" && req.ApplyNow {
+		ts, err := a.st.ListProxyTargetsBySiteID(s.ID)
+		if err != nil || len(ts) == 0 {
+			out.Warnings = append(out.Warnings, "proxy site created: add at least 1 proxy target, then click Apply")
+			req.ApplyNow = false
+		}
+	}
+
+
 
 	// Bootstrap vhost immediately so HTTP-01 can work (unless disabled).
 	if req.ApplyNow {

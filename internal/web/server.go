@@ -4,6 +4,7 @@ import (
 	"context"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ func New(cfg *config.Config, paths config.Paths, st store.SiteStore) (*Server, e
 	template.Must(tpl.New("login").Parse(loginHTML))
 	template.Must(tpl.New("sites").Parse(sitesHTML))
 	template.Must(tpl.New("site_form").Parse(siteFormHTML))
+        template.Must(tpl.New("proxy_targets").Parse(proxyTargetsHTML))
 	template.Must(tpl.New("apply_form").Parse(applyFormHTML))
 	template.Must(tpl.New("apply_result").Parse(applyResultHTML))
 	template.Must(tpl.New("certs").Parse(certsHTML))
@@ -76,6 +78,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/ui/sites/new", s.requireAuth(s.handleSiteNew))
 	mux.HandleFunc("/ui/sites/edit", s.requireAuth(s.handleSiteEdit))
 	mux.HandleFunc("/ui/sites/disable", s.requireAuth(s.handleSiteDisable))
+
+        // proxy targets
+        mux.HandleFunc("/ui/sites/targets", s.requireAuth(s.handleProxyTargets))
+        mux.HandleFunc("/ui/sites/targets/add", s.requireAuth(s.handleProxyTargetAdd))
+        mux.HandleFunc("/ui/sites/targets/del", s.requireAuth(s.handleProxyTargetDel))
+
 
 	// apply
 	mux.HandleFunc("/ui/apply", s.requireAuth(s.handleApply))
@@ -257,12 +265,15 @@ func (s *Server) handleSiteNew(w http.ResponseWriter, r *http.Request) {
 				"http3":     "true",
 				"provision": "true",
 				"applynow":  "true",
+                                "targets":   "",
 			},
 		})
 		return
 
 	case http.MethodPost:
 		_ = r.ParseForm()
+                targetsRaw := r.FormValue("targets")
+                targets := splitLines(targetsRaw)
 
 		req := app.SiteAddRequest{
 			User:      strings.TrimSpace(r.FormValue("user")),
@@ -274,7 +285,30 @@ func (s *Server) handleSiteNew(w http.ResponseWriter, r *http.Request) {
 			Provision: parseBool(r.FormValue("provision"), true),
 			SkipCert:  parseBool(r.FormValue("skipcert"), false),
 			ApplyNow:  parseBool(r.FormValue("applynow"), true),
+                        ProxyTargets: targets,
 		}
+
+		// Avoid "apply-now failed" warnings for proxy mode.
+		if strings.TrimSpace(req.Mode) == "proxy" && req.ApplyNow && len(req.ProxyTargets) == 0 {
+			s.render(w, r, "Add Site", "site_form", map[string]any{
+				"Mode":  "new",
+				"Error": "Proxy mode requires at least 1 proxy target when Apply Now is enabled. Add targets or disable Apply Now.",
+				"Form": map[string]any{
+					"user":      req.User,
+					"domain":    req.Domain,
+					"mode":      req.Mode,
+					"php":       req.PHP,
+					"webroot":   req.Webroot,
+					"http3":     boolStr(req.HTTP3),
+					"provision": boolStr(req.Provision),
+					"skipcert":  boolStr(req.SkipCert),
+					"applynow":  boolStr(req.ApplyNow),
+					"targets":   targetsRaw,
+				},
+			})
+			return
+		}
+
 
 		res, err := s.core.SiteAdd(r.Context(), req)
 		if err != nil {
@@ -291,6 +325,7 @@ func (s *Server) handleSiteNew(w http.ResponseWriter, r *http.Request) {
 					"provision": boolStr(req.Provision),
 					"skipcert":  boolStr(req.SkipCert),
 					"applynow":  boolStr(req.ApplyNow),
+                                        "targets":   targetsRaw,
 				},
 			})
 			return
@@ -359,6 +394,45 @@ func (s *Server) handleSiteEdit(w http.ResponseWriter, r *http.Request) {
 			ApplyNow: applyNow,
 		}
 
+
+			// If user asks ApplyNow in proxy mode, ensure at least 1 enabled target exists.
+			if strings.TrimSpace(req.Mode) == "proxy" && req.ApplyNow {
+				cur, err := s.core.SiteGet(r.Context(), req.Domain)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				tgs, err := s.st.ListProxyTargetsBySiteID(cur.ID)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				enabledCount := 0
+				for _, t := range tgs {
+					if t.Enabled {
+						enabledCount++
+					}
+				}
+				if enabledCount == 0 {
+					s.render(w, r, "Edit Site", "site_form", map[string]any{
+						"Mode":  "edit",
+						"Error": "Proxy mode requires at least 1 enabled proxy target to Apply Now. Go to Targets and add one first.",
+						"Form": map[string]any{
+							"domain":   req.Domain,
+							"user":     req.User,
+							"mode":     req.Mode,
+							"php":      req.PHP,
+							"webroot":  req.Webroot,
+							"http3":    boolStr(http3),
+							"enabled":  boolStr(enabled),
+							"applynow": boolStr(applyNow),
+						},
+					})
+					return
+				}
+			}
+
+
 		updated, err := s.core.SiteEdit(r.Context(), req)
 		if err != nil {
 			s.render(w, r, "Edit Site", "site_form", map[string]any{
@@ -402,6 +476,106 @@ func (s *Server) handleSiteDisable(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/ui/sites", http.StatusFound)
 }
+
+
+// ---------------- proxy targets ----------------
+
+func (s *Server) handleProxyTargets(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet {
+                http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+                return
+        }
+        domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+        if domain == "" {
+                http.Error(w, "domain is required", http.StatusBadRequest)
+                return
+        }
+
+        site, err := s.core.SiteGet(r.Context(), domain)
+        if err != nil {
+                http.Error(w, err.Error(), http.StatusBadRequest)
+                return
+        }
+        if strings.TrimSpace(site.Mode) != "proxy" {
+                http.Error(w, "site is not in proxy mode", http.StatusBadRequest)
+                return
+        }
+
+        targets, err := s.st.ListProxyTargetsBySiteID(site.ID)
+        if err != nil {
+                http.Error(w, err.Error(), http.StatusInternalServerError)
+                return
+        }
+
+        s.render(w, r, "Proxy Targets", "proxy_targets", map[string]any{
+                "Site":    site,
+                "Targets": targets,
+        })
+}
+
+func (s *Server) handleProxyTargetAdd(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+                return
+        }
+        _ = r.ParseForm()
+        domain := strings.TrimSpace(r.FormValue("domain"))
+        target := strings.TrimSpace(r.FormValue("target"))
+        weight, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("weight")))
+        backup := parseBool(r.FormValue("backup"), false)
+        enabled := parseBool(r.FormValue("enabled"), true)
+
+        if domain == "" || target == "" {
+                http.Error(w, "domain and target are required", http.StatusBadRequest)
+                return
+        }
+
+        site, err := s.core.SiteGet(r.Context(), domain)
+        if err != nil {
+                http.Error(w, err.Error(), http.StatusBadRequest)
+                return
+        }
+        if strings.TrimSpace(site.Mode) != "proxy" {
+                http.Error(w, "site is not in proxy mode", http.StatusBadRequest)
+                return
+        }
+
+        if err := s.st.UpsertProxyTarget(site.ID, target, weight, backup, enabled); err != nil {
+                http.Error(w, err.Error(), http.StatusBadRequest)
+                return
+        }
+		http.Redirect(w, r, "/ui/sites/targets?domain="+url.QueryEscape(domain), http.StatusFound)
+}
+
+func (s *Server) handleProxyTargetDel(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+                return
+        }
+        _ = r.ParseForm()
+        domain := strings.TrimSpace(r.FormValue("domain"))
+        target := strings.TrimSpace(r.FormValue("target"))
+        if domain == "" || target == "" {
+                http.Error(w, "domain and target are required", http.StatusBadRequest)
+                return
+        }
+
+        site, err := s.core.SiteGet(r.Context(), domain)
+        if err != nil {
+                http.Error(w, err.Error(), http.StatusBadRequest)
+                return
+        }
+
+        if err := s.st.DisableProxyTarget(site.ID, target); err != nil {
+                http.Error(w, err.Error(), http.StatusBadRequest)
+                return
+        }
+		http.Redirect(w, r, "/ui/sites/targets?domain="+url.QueryEscape(domain), http.StatusFound)
+}
+
+
+
+
 
 // ---------------- apply ----------------
 
@@ -552,6 +726,22 @@ func boolStr(b bool) string {
 	return "false"
 }
 
+
+func splitLines(s string) []string {
+        s = strings.ReplaceAll(s, "\r\n", "\n")
+        s = strings.ReplaceAll(s, "\r", "\n")
+        var out []string
+        for _, line := range strings.Split(s, "\n") {
+                line = strings.TrimSpace(line)
+                if line == "" {
+                        continue
+                }
+                out = append(out, line)
+        }
+        return out
+}
+
+
 // ---------------- templates ----------------
 
 const layoutHTML = `<!doctype html>
@@ -581,6 +771,8 @@ const contentHTML = `{{define "content"}}
     {{template "certs" .}}
   {{- else if eq .Page "cert_info" -}}
     {{template "cert_info" .}}
+  {{- else if eq .Page "proxy_targets" -}}
+    {{template "proxy_targets" .}}
   {{- else if eq .Page "cert_check" -}}
     {{template "cert_check" .}}
   {{- else -}}
@@ -664,6 +856,9 @@ const sitesHTML = `{{define "sites"}}
             <input type="hidden" name="domain" value="{{.Site.Domain}}">
             <button>Apply</button>
           </form>
+          {{if eq .Site.Mode "proxy"}}
+            <a href="/ui/sites/targets?domain={{.Site.Domain}}" style="margin-left:8px;">Targets</a>
+          {{end}}
           <a href="/ui/sites/edit?domain={{.Site.Domain}}" style="margin-left:8px;">Edit</a>
           <form method="post" action="/ui/sites/disable" style="display:inline; margin-left:8px;"
                 onsubmit="return confirm('Disable {{.Site.Domain}} ?');">
@@ -724,6 +919,14 @@ const siteFormHTML = `{{define "site_form"}}
         </select>
 
         {{if eq .Mode "new"}}
+          <label>Proxy Targets (one per line)</label>
+          <textarea name="targets" style="padding:8px; min-height:90px;"
+            placeholder="127.0.0.1:8080&#10;10.0.0.2:8080 50 (optional weight)">{{index .Form "targets"}}</textarea>
+
+          <div style="grid-column: 1 / span 2; opacity:.75; font-size:13px;">
+            Used only when Mode=proxy. If empty, create site first, then add targets from the Targets page.
+          </div>
+
           <label>Provision</label>
           <select name="provision" style="padding:8px;">
             <option value="true" {{if eq (index .Form "provision") "true"}}selected{{end}}>true</option>
@@ -763,6 +966,81 @@ const siteFormHTML = `{{define "site_form"}}
     </form>
   {{end}}
 {{end}}`
+
+
+const proxyTargetsHTML = `{{define "proxy_targets"}}
+  <h2>Proxy Targets: {{.Site.Domain}}</h2>
+  <p style="opacity:.8; margin-top:0;">
+    Manage upstream targets for this proxy site.
+  </p>
+
+  <div style="margin:10px 0; display:flex; gap:10px; align-items:center;">
+    <form method="post" action="/ui/apply" style="display:inline;">
+      <input type="hidden" name="domain" value="{{.Site.Domain}}">
+      <button style="padding:8px 10px;">Apply</button>
+    </form>
+    <a href="/ui/sites">Back to Sites</a>
+  </div>
+
+  <table cellpadding="8" cellspacing="0" border="1" style="border-collapse:collapse; width:100%; max-width:900px;">
+    <thead>
+      <tr>
+        <th align="left">Target</th>
+        <th>Weight</th>
+        <th>Backup</th>
+        <th>Enabled</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {{range .Targets}}
+      <tr>
+        <td>{{.Addr}}</td>
+        <td align="center">{{.Weight}}</td>
+        <td align="center">{{if .Backup}}yes{{else}}no{{end}}</td>
+        <td align="center">{{if .Enabled}}yes{{else}}no{{end}}</td>
+        <td align="center">
+          <form method="post" action="/ui/sites/targets/del" style="display:inline;"
+                onsubmit="return confirm('Disable target {{.Addr}} ?');">
+            <input type="hidden" name="domain" value="{{$.Site.Domain}}">
+            <input type="hidden" name="target" value="{{.Addr}}">
+            <button>Disable</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:18px;">Add / Update target</h3>
+  <form method="post" action="/ui/sites/targets/add" style="max-width:900px;">
+    <input type="hidden" name="domain" value="{{.Site.Domain}}">
+    <div style="display:grid; grid-template-columns: 180px 1fr; gap:10px;">
+      <label>Target</label>
+      <input name="target" style="padding:8px;" placeholder="127.0.0.1:8080 or unix:/run/app.sock">
+
+      <label>Weight</label>
+      <input name="weight" style="padding:8px;" value="100">
+
+      <label>Backup</label>
+      <select name="backup" style="padding:8px;">
+        <option value="false" selected>false</option>
+        <option value="true">true</option>
+      </select>
+
+      <label>Enabled</label>
+      <select name="enabled" style="padding:8px;">
+        <option value="true" selected>true</option>
+        <option value="false">false</option>
+      </select>
+    </div>
+    <div style="margin-top:12px;">
+      <button style="padding:10px 14px;">Save Target</button>
+    </div>
+  </form>
+{{end}}`
+
+
 
 const applyFormHTML = `{{define "apply_form"}}
   <h2>Apply</h2>
