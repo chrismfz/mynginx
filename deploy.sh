@@ -16,7 +16,7 @@ HTML_PATH="/opt/nginx/html"
 echo "--- 1. Installing Build Dependencies & Tools ---"
 apt update
 apt install -y build-essential cmake git curl wget perl golang-go gpg lsb-release ca-certificates apt-transport-https \
-               zlib1g-dev libpcre2-dev libssl-dev certbot net-tools sudo libmcrypt-dev mcrypt acl
+               zlib1g-dev libpcre2-dev libssl-dev certbot net-tools sudo libmcrypt-dev mcrypt acl libreadline-dev libunwind-dev 
 
 echo "--- 2. Fetching Source Code & Master Config ---"
 mkdir -p $SRC_DIR
@@ -88,7 +88,14 @@ echo "/opt/luajit/lib" > /etc/ld.so.conf.d/luajit.conf
 ldconfig
 
 export LUAJIT_LIB=/opt/luajit/lib
-export LUAJIT_INC=/opt/luajit/include/luajit-2.1
+export LUAJIT_INC="$(ls -d /opt/luajit/include/luajit-* | head -n1)"
+
+# Optional safety check (fail fast)
+if [ -z "$LUAJIT_INC" ] || [ ! -d "$LUAJIT_INC" ]; then
+  echo "ERROR: Could not find LuaJIT include dir under /opt/luajit/include/"
+  ls -la /opt/luajit/include/ || true
+  exit 1
+fi
 
 
 
@@ -105,7 +112,6 @@ cd $SRC_DIR/nginx
     --with-http_v3_module \
     --with-cc-opt="-I$AWS_LC_PATH/include -I$SRC_DIR/ngx_brotli/deps/brotli/c/include -I$LUAJIT_INC" \
     --with-ld-opt="-L$AWS_LC_PATH/lib -L$SRC_DIR/ngx_brotli/deps/brotli/out -L$LUAJIT_LIB -Wl,-rpath,/opt/luajit/lib -lluajit-5.1 -lm -ldl -lssl -lcrypto -lstdc++" \
-    --with-ld-opt="-L$AWS_LC_PATH/lib -L$SRC_DIR/ngx_brotli/deps/brotli/out -lssl -lcrypto -lstdc++" \
     --with-pcre-jit \
     --with-threads \
     --with-file-aio \
@@ -127,9 +133,9 @@ Wants=network-online.target
 [Service]
 Type=forking
 PIDFile=$NGINX_PATH/logs/nginx.pid
-ExecStartPre=$NGINX_PATH/sbin/nginx -t
-ExecStart=$NGINX_PATH/sbin/nginx
-ExecReload=$NGINX_PATH/sbin/nginx -s reload
+ExecStartPre=/opt/nginx/sbin/nginx -t -c /opt/nginx/conf/nginx.conf
+ExecStart=/opt/nginx/sbin/nginx -c /opt/nginx/conf/nginx.conf
+ExecReload=/opt/nginx/sbin/nginx -s reload -c /opt/nginx/conf/nginx.conf
 ExecStop=/bin/kill -s QUIT \$MAINPID
 PrivateTmp=true
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -164,7 +170,7 @@ $NGINX_PATH/logs/*.log {
     rotate 14
     compress
     notifempty
-    create 0640 root root
+    create 0640 www-data www-data
     sharedscripts
     postrotate
         [ -f $NGINX_PATH/logs/nginx.pid ] && kill -USR1 \$(cat $NGINX_PATH/logs/nginx.pid)
@@ -178,4 +184,7 @@ git clone https://github.com/chrismfz/mynginx.git
 
 
 echo "--- DEPLOYMENT COMPLETE ---"
+
+/opt/nginx/sbin/nginx -V 2>&1
+
 
