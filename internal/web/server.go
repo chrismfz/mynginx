@@ -40,6 +40,7 @@ func New(cfg *config.Config, paths config.Paths, st store.SiteStore) (*Server, e
 	tpl := template.New("root")
 	template.Must(tpl.New("layout").Parse(layoutHTML))
 	template.Must(tpl.New("menu").Parse(menuHTML))
+        template.Must(tpl.New("content").Parse(contentHTML))
 	template.Must(tpl.New("login").Parse(loginHTML))
 	template.Must(tpl.New("sites").Parse(sitesHTML))
 	template.Must(tpl.New("site_form").Parse(siteFormHTML))
@@ -535,10 +536,32 @@ const layoutHTML = `<!doctype html>
 <body style="font-family:system-ui; margin:24px;">
   {{if .Authed}}{{template "menu" .}}{{end}}
   <div style="max-width:1100px;">
-    {{template .Page .}}
+    {{template "content" .}}
   </div>
 </body>
 </html>`
+
+const contentHTML = `{{define "content"}}
+  {{- if eq .Page "sites" -}}
+    {{template "sites" .}}
+  {{- else if eq .Page "site_form" -}}
+    {{template "site_form" .}}
+  {{- else if eq .Page "apply_form" -}}
+    {{template "apply_form" .}}
+  {{- else if eq .Page "apply_result" -}}
+    {{template "apply_result" .}}
+  {{- else if eq .Page "certs" -}}
+    {{template "certs" .}}
+  {{- else if eq .Page "cert_info" -}}
+    {{template "cert_info" .}}
+  {{- else if eq .Page "cert_check" -}}
+    {{template "cert_check" .}}
+  {{- else -}}
+    <h2>Unknown page</h2>
+    <p>Page: <code>{{.Page}}</code></p>
+  {{- end -}}
+{{end}}`
+
 
 const menuHTML = `{{define "menu"}}
   <div style="display:flex; gap:12px; align-items:center; margin-bottom:18px;">
