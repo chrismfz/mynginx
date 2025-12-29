@@ -422,3 +422,23 @@ func (s *Store) UpdatePanelUserLastLogin(id int64) error {
 	`, now, id)
 	return err
 }
+
+func (s *Store) GetUserByID(id int64) (store.User, error) {
+        if id == 0 {
+                return store.User{}, fmt.Errorf("id is required")
+        }
+        var out store.User
+        var created string
+        err := s.db.QueryRow(`
+                SELECT id, username, home_dir, created_at
+                  FROM users
+                 WHERE id=?
+        `, id).Scan(&out.ID, &out.Username, &out.HomeDir, &created)
+        if err != nil {
+                return store.User{}, err
+        }
+        if t, err := time.Parse(time.RFC3339Nano, created); err == nil {
+                out.CreatedAt = t
+        }
+        return out, nil
+}

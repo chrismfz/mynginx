@@ -225,7 +225,26 @@ func (s *Server) handleSites(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.render(w, r, "Sites", "sites", map[string]any{"Items": items})
+        // Optional enrich for UI: owner username + cert info
+        owners := map[string]string{}
+        certs := map[string]any{} // domain -> *certs.CertInfo (stored as interface for templates)
+        for _, it := range items {
+                if it.Site.UserID != 0 {
+                        if u, err := s.st.GetUserByID(it.Site.UserID); err == nil {
+                                owners[it.Site.Domain] = u.Username
+                        }
+                }
+                if ci, err := s.core.CertInfo(it.Site.Domain); err == nil && ci != nil && ci.Exists {
+                        certs[it.Site.Domain] = ci
+                }
+        }
+
+        s.render(w, r, "Sites", "sites", map[string]any{
+                "Items":  items,
+                "Owners": owners,
+                "Certs":  certs,
+        })
+
 }
 
 func (s *Server) handleSiteNew(w http.ResponseWriter, r *http.Request) {
@@ -298,11 +317,19 @@ func (s *Server) handleSiteEdit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+                owner := ""
+                if cur.UserID != 0 {
+                        if u, err := s.st.GetUserByID(cur.UserID); err == nil {
+                                owner = u.Username
+                        }
+                }
+
 		s.render(w, r, "Edit Site", "site_form", map[string]any{
 			"Mode": "edit",
 			"Form": map[string]any{
 				"domain":   cur.Domain,
-				"user":     "",
+                                "user":     owner,
 				"mode":     cur.Mode,
 				"php":      cur.PHPVersion,
 				"webroot":  cur.Webroot,
@@ -604,8 +631,10 @@ const sitesHTML = `{{define "sites"}}
     <thead>
       <tr>
         <th align="left">Domain</th>
+        <th>Owner</th>
         <th>Mode</th>
         <th>Enabled</th>
+        <th>TLS</th>
         <th>State</th>
         <th>Last Applied</th>
         <th>PHP</th>
@@ -616,8 +645,17 @@ const sitesHTML = `{{define "sites"}}
     {{range .Items}}
       <tr>
         <td>{{.Site.Domain}}</td>
+        <td align="center">{{index $.Owners .Site.Domain}}</td>
         <td align="center">{{.Site.Mode}}</td>
         <td align="center">{{if .Site.Enabled}}yes{{else}}no{{end}}</td>
+        <td align="center">
+          {{ $ci := index $.Certs .Site.Domain }}
+          {{ if $ci }}
+            yes ({{ $ci.DaysLeft }}d)
+          {{ else }}
+            no
+          {{ end }}
+        </td>
         <td align="center">{{.State}}</td>
         <td align="center">{{.Last}}</td>
         <td align="center">{{.Site.PHPVersion}}</td>
