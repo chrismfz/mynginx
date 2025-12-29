@@ -22,6 +22,7 @@ echo "--- 2. Fetching Source Code & Master Config ---"
 mkdir -p $SRC_DIR
 mkdir -p $NGINX_PATH/conf
 mkdir -p $NGINX_PATH/conf/sites
+mkdir -p $NGINX_PATH/conf/lua
 mkdir -p $NGINX_PATH/logs
 mkdir -p $NGINX_PATH/cache
 mkdir -p $NGINX_PATH/cache/proxy_micro
