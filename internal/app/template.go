@@ -99,7 +99,7 @@ func (a *App) buildTemplateData(s store.Site, domain string, proxyLister proxyTa
 			Cache: nginx.CacheCfg{
 				Enabled: true,
 				Zone:    "php_cache",
-				TTL200:  "1s",
+				TTL200:  "15s",
 			},
 		}
 	}
@@ -115,7 +115,7 @@ func (a *App) buildTemplateData(s store.Site, domain string, proxyLister proxyTa
 			Microcache: nginx.CacheCfg{
 				Enabled: true,
 				Zone:    "proxy_micro",
-				TTL200:  "1s",
+				TTL200:  "15s",
 			},
 			StaticCache: nginx.CacheCfg{
 				Enabled: true,
