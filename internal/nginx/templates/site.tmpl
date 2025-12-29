@@ -67,7 +67,11 @@
 
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host  $host;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Port  443;
+        proxy_set_header X-Forwarded-Ssl   on;
+        proxy_redirect off;
 
         proxy_connect_timeout {{ .Proxy.TimeConnect }};
         proxy_read_timeout    {{ .Proxy.TimeRead }};
@@ -87,6 +91,10 @@
         add_header Cache-Control "public" always;
         {{- end }}
 
+        # If upstream sets cookies on assets (rare), force them to be HTTPS-safe.
+        # (Harmless if no cookies are set.)
+        proxy_cookie_path / "/; Secure; SameSite=Lax";
+
         proxy_pass http://up_{{ .UpstreamKey }};
     }
 
@@ -101,12 +109,19 @@
 
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host  $host;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Port  443;
+        proxy_set_header X-Forwarded-Ssl   on;
+        proxy_redirect off;
 
         {{- if .Proxy.Websockets }}
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         {{- end }}
+
+        # Make upstream cookies HTTPS-safe behind the reverse proxy.
+        proxy_cookie_path / "/; Secure; HttpOnly; SameSite=Lax";
 
         proxy_connect_timeout {{ .Proxy.TimeConnect }};
         proxy_read_timeout    {{ .Proxy.TimeRead }};

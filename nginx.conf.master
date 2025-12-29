@@ -1,19 +1,14 @@
 user www-data;
 worker_processes auto;
 thread_pool default_pool threads=32 max_queue=65536;
+events { worker_connections 1024; }
 
-events {
-    worker_connections 1024;
-}
 
 http {
-    # Generated vhosts (managed by NGM)
-    include /opt/nginx/conf/sites/*.conf;
-
     access_log /opt/nginx/logs/access.log;
     error_log  /opt/nginx/logs/error.log warn;
 
-    include       mime.types;
+    include       /opt/nginx/conf/mime.types;
     default_type  application/octet-stream;
 
     sendfile        on;
@@ -32,13 +27,21 @@ http {
     brotli_static on;
     brotli_types text/plain text/css application/javascript application/json image/svg+xml;
 
-    # Cache setup (zones/paths MUST be global)
-    # One zone for microcache (HTML), one for static assets.
-    proxy_cache_key "$scheme$request_method$host$request_uri";
-    proxy_cache_path /opt/nginx/cache/proxy_micro  levels=1:2 keys_zone=proxy_micro:20m  max_size=512m  inactive=10m  use_temp_path=off;
-    proxy_cache_path /opt/nginx/cache/proxy_static levels=1:2 keys_zone=proxy_static:100m max_size=10g   inactive=7d   use_temp_path=off;
-
-
-    fastcgi_cache_path /opt/nginx/cache/fastcgi levels=1:2 keys_zone=php_cache:10m inactive=60m max_size=512m;
+    # Cache keys
+    proxy_cache_key   "$scheme$request_method$host$request_uri";
     fastcgi_cache_key "$scheme$request_method$host$request_uri";
+
+    # Proxy cache zones used by NGM templates
+    proxy_cache_path /opt/nginx/cache/proxy_micro
+        levels=1:2 keys_zone=proxy_micro:20m max_size=512m inactive=60m use_temp_path=off;
+
+    proxy_cache_path /opt/nginx/cache/proxy_static
+        levels=1:2 keys_zone=proxy_static:50m max_size=5g inactive=30d use_temp_path=off;
+
+    # FastCGI cache zone used by PHP mode
+    fastcgi_cache_path /opt/nginx/cache/fastcgi
+        levels=1:2 keys_zone=php_cache:50m inactive=60m max_size=5g;
+
+    # Generated vhosts (managed by NGM)
+    include /opt/nginx/conf/sites/*.conf;
 }
