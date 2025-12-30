@@ -221,8 +221,7 @@ server {
 
 # HTTPS (UDP 443 - HTTP/3)
 server {
-    listen 443 quic reuseport;
-
+    listen 443 quic;
     http3 on;
 
 {{ template "https_common" . }}

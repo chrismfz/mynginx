@@ -53,6 +53,18 @@ open_file_cache_valid    60s;
 open_file_cache_min_uses 1;
 open_file_cache_errors   on;
 
+server {
+    listen 443 quic reuseport;
+    server_name _;
+
+    ssl_certificate     /opt/openresty/nginx/conf/selfsigned/fullchain.pem;
+    ssl_certificate_key /opt/openresty/nginx/conf/selfsigned/privkey.pem;
+
+    ssl_protocols TLSv1.3;
+    http3 on;
+
+    return 444;
+}
     # Cache keys
     proxy_cache_key   "$scheme$request_method$host$request_uri";
     fastcgi_cache_key "$scheme$request_method$host$request_uri";
@@ -70,4 +82,7 @@ open_file_cache_errors   on;
 
     # Generated vhosts (managed by NGM)
     include /opt/openresty/nginx/conf/sites/*.conf;
+
+
+
 }

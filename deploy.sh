@@ -51,6 +51,45 @@ else
   git clone --recursive https://github.com/google/ngx_brotli.git
 fi
 
+
+
+
+
+
+echo "--- 2.1 Self-signed cert for global QUIC reuseport listener ---"
+SELFSIGNED_DIR="${NGINX_PREFIX}/conf/selfsigned"
+mkdir -p "${SELFSIGNED_DIR}"
+
+# Keep the private key readable by nginx worker user via group, but not world-readable
+chown -R root:www-data "${SELFSIGNED_DIR}"
+chmod 0750 "${SELFSIGNED_DIR}"
+
+# Only generate if missing (so reruns don't rotate certs unexpectedly)
+if [ ! -f "${SELFSIGNED_DIR}/privkey.pem" ] || [ ! -f "${SELFSIGNED_DIR}/fullchain.pem" ]; then
+  umask 027
+
+  # ECDSA P-256 (fast, TLS1.3-friendly)
+  openssl req -x509 -newkey ec \
+    -pkeyopt ec_paramgen_curve:prime256v1 \
+    -nodes \
+    -keyout "${SELFSIGNED_DIR}/privkey.pem" \
+    -out "${SELFSIGNED_DIR}/fullchain.pem" \
+    -days 3650 \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost"
+
+  chown root:www-data "${SELFSIGNED_DIR}/privkey.pem" "${SELFSIGNED_DIR}/fullchain.pem"
+  chmod 0640 "${SELFSIGNED_DIR}/privkey.pem"
+  chmod 0644 "${SELFSIGNED_DIR}/fullchain.pem"
+fi
+
+
+
+
+
+
+
+
 echo "--- 3.5 Build Brotli (static libs) for ngx_brotli ---"
 cd "${SRC_DIR}/ngx_brotli/deps/brotli"
 rm -rf out
