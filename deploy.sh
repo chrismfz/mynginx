@@ -16,7 +16,7 @@ HTML_PATH="/opt/nginx/html"
 echo "--- 1. Installing Build Dependencies & Tools ---"
 apt update
 apt install -y build-essential cmake git curl wget perl golang-go gpg lsb-release ca-certificates apt-transport-https \
-               zlib1g-dev libpcre2-dev libssl-dev certbot net-tools sudo libmcrypt-dev mcrypt acl libreadline-dev libunwind-dev 
+               zlib1g-dev libpcre2-dev libssl-dev certbot net-tools sudo libmcrypt-dev mcrypt acl libreadline-dev libunwind-dev patch
 
 echo "--- 2. Fetching Source Code & Master Config ---"
 mkdir -p $SRC_DIR
@@ -81,8 +81,30 @@ cmake --build . --config Release --target brotlienc brotlicommon brotlidec
 
 # --- 3.6 Prepare LUA ---
 
-echo "--- Patching lua-nginx-module: disable ssl_*_by_lua features (AWS-LC mismatch) ---"
-sed -i '/ngx_http_lua_ssl_/d' "$SRC_DIR/lua-nginx-module/config"
+echo "--- Patching lua-nginx-module for AWS-LC (no SSL_export_keying_material_early) ---"
+
+patch -p1 -N -d "$SRC_DIR/lua-nginx-module" <<'PATCH' || true
+--- a/src/ngx_http_lua_ssl_export_keying_material.c
++++ b/src/ngx_http_lua_ssl_export_keying_material.c
+@@
+-    rc = SSL_export_keying_material_early(ssl_conn, out, out_size,
+-                                          (const char *) label, label_len,
+-                                          (const unsigned char *) context,
+-                                          context_len, use_context);
++    #if defined(OPENSSL_IS_AWSLC)
++    rc = SSL_export_keying_material(ssl_conn, out, out_size,
++                                    (const char *) label, label_len,
++                                    (const unsigned char *) context,
++                                    context_len, use_context);
++    #else
++    rc = SSL_export_keying_material_early(ssl_conn, out, out_size,
++                                          (const char *) label, label_len,
++                                          (const unsigned char *) context,
++                                          context_len, use_context);
++    #endif
+PATCH
+
+
 
 echo "--- Building LuaJIT ---"
 cd $SRC_DIR/LuaJIT
