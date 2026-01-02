@@ -38,7 +38,10 @@
 
     location ~ \.php$ {
         include fastcgi_params;
-        fastcgi_pass {{ .PHP.Pass }};
+	fastcgi_param HTTP_HOST   $host;
+	fastcgi_param SERVER_NAME $host;
+	fastcgi_param HTTPS       on;
+	fastcgi_pass {{ .PHP.Pass }};
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
 
         {{- if .PHP.Cache.Enabled }}
@@ -67,11 +70,7 @@
         # (Nginx will manage keepalive to the upstream pool.)
         proxy_set_header Connection "";
 
-        {{- if .Proxy.PassHost }}
-        proxy_set_header Host $host;
-        {{- else }}
-        proxy_set_header Host $http_host;
-        {{- end }}
+	proxy_set_header Host $host;
 
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
